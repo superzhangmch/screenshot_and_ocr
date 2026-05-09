@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>SnapOCR</string>
+  <key>CFBundleDisplayName</key>
+  <string>SnapOCR</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.snapocr.app</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleExecutable</key>
+  <string>SnapOCR</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <!-- Belt-and-suspenders alongside disableAutomaticTermination(): tells macOS this
+       app does NOT want to be auto-reaped when idle / windowless. -->
+  <key>NSSupportsAutomaticTermination</key>
+  <false/>
+  <key>NSSupportsSuddenTermination</key>
+  <false/>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>SnapOCR needs to capture your screen so you can crop a region for OCR.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>SnapOCR uses AppleEvents only for clipboard/save dialogs.</string>
+</dict>
+</plist>

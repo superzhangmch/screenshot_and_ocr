@@ -1,0 +1,6 @@
+{
+  "apiBase": "https://YOUR_API_BASE",
+  "apiKey": "YOUR_API_KEY",
+  "ocrModel": "YOUR_MODEL_NAME",
+  "showMenuBarIcon": false
+}

@@ -1,0 +1,9 @@
+.build/
+*.app/
+*.xcodeproj/
+.DS_Store
+*.swiftpm/
+Package.resolved
+
+# Local-only: real OCR endpoint + key. Stays out of git.
+config.json
