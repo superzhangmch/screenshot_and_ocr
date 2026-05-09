@@ -8,7 +8,7 @@ struct SelectionResult {
 
 final class OverlayController {
     private var windows: [OverlayWindow] = []
-    private let snapshots: [ScreenSnapshot]
+    private var snapshots: [ScreenSnapshot]      // var so we can drop after teardown
     private let completion: (SelectionResult?) -> Void
     private var didFinish = false
 
@@ -60,8 +60,14 @@ final class OverlayController {
             for: result,
             onClose: { [weak self] in
                 guard let self = self else { return }
-                for w in self.windows { w.orderOut(nil) }
+                for w in self.windows {
+                    w.orderOut(nil)
+                    w.contentView = nil      // drop OverlayView reference
+                }
                 self.windows.removeAll()
+                // Drop the captured screenshots so their CGImage backing memory is freed
+                // immediately rather than waiting for AppDelegate.overlay = nil to ARC us.
+                self.snapshots.removeAll()
                 self.completion(result)
             },
             onSelectionResize: { [weak self] newGlobal in

@@ -1,4 +1,5 @@
 import AppKit
+import Darwin   // for malloc_zone_pressure_relief
 
 final class ToolbarController: NSObject {
     private static var current: ToolbarController?
@@ -161,11 +162,19 @@ final class ToolbarController: NSObject {
 
     fileprivate func dismiss() {
         if let m = localKeyMonitor { NSEvent.removeMonitor(m); localKeyMonitor = nil }
-        imageWindow?.orderOut(nil)
-        toolbarWindow?.orderOut(nil)
-        ocrPopup?.orderOut(nil)
+        // Tear down windows + break contentView refs so AppKit / ARC can reclaim
+        // the editor's CGImage, NSTextView layout managers, etc. promptly.
+        imageWindow?.orderOut(nil); imageWindow?.contentView = nil; imageWindow = nil
+        toolbarWindow?.orderOut(nil); toolbarWindow?.contentView = nil; toolbarWindow = nil
+        ocrPopup?.orderOut(nil); ocrPopup?.contentView = nil; ocrPopup = nil
+        editorView = nil
+        toolbarView = nil
         ToolbarController.current = nil
         onClose()
+        // Hint to malloc to actually return free pages to the OS instead of caching them
+        // forever. This is what makes RSS shrink between captures (private memory was
+        // already stable; this just makes the visible "RSS climbing" trend stop).
+        malloc_zone_pressure_relief(malloc_default_zone(), 0)
     }
 }
 
@@ -231,6 +240,13 @@ extension ToolbarController {
 
     private func runOCR() {
         guard let img = editorView.flattenedCGImage() else { return }
+        // If a previous OCR popup is still around (user clicked OCR twice), tear it
+        // down first — otherwise the old NSWindow stays in the app's window list,
+        // pinning its NSTextView + scroll view in memory.
+        if let prev = ocrPopup {
+            prev.orderOut(nil)
+            prev.contentView = nil
+        }
         let popup = makeOCRPopup(initialText: "Running OCR…")
         ocrPopup = popup
         Task { @MainActor in

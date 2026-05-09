@@ -1,6 +1,5 @@
 import AppKit
 import CoreGraphics
-import ScreenCaptureKit
 
 struct ScreenSnapshot {
     let screen: NSScreen
@@ -8,25 +7,21 @@ struct ScreenSnapshot {
     let frame: NSRect
 }
 
+/// Lightweight screen capture using `CGDisplayCreateImage`. Synchronous, no helper
+/// daemon (vs ScreenCaptureKit which keeps `replayd` resident and adds ~60MB+).
+/// The API is deprecated in macOS 14 but still functional and dramatically lighter.
 enum CaptureService {
     @discardableResult
     static func requestScreenRecordingPermission() -> Bool {
         return CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
     }
 
-    static func captureAllScreens() async throws -> [ScreenSnapshot] {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    static func captureAllScreens() -> [ScreenSnapshot] {
         var results: [ScreenSnapshot] = []
         for screen in NSScreen.screens {
-            guard let displayID = screen.displayID,
-                  let scDisplay = content.displays.first(where: { $0.displayID == displayID }) else { continue }
-            let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
-            let cfg = SCStreamConfiguration()
-            cfg.width = scDisplay.width * 2
-            cfg.height = scDisplay.height * 2
-            cfg.showsCursor = false
-            cfg.capturesAudio = false
-            let img = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
+            guard let displayID = screen.displayID else { continue }
+            // CGDisplayCreateImage returns a CGImage at the display's native pixel size.
+            guard let img = CGDisplayCreateImage(displayID) else { continue }
             results.append(ScreenSnapshot(screen: screen, image: img, frame: screen.frame))
         }
         return results

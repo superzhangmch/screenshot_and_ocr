@@ -46,19 +46,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func triggerCapture() {
         guard overlay == nil else { return }
-        Task { @MainActor in
-            do {
-                let snapshots = try await CaptureService.captureAllScreens()
-                let controller = OverlayController(snapshots: snapshots) { [weak self] result in
-                    self?.overlay = nil
-                    if let result = result { OverlayController.handleSelectionResult(result) }
-                }
-                self.overlay = controller
-                controller.show()
-            } catch {
-                NSLog("Capture failed: \(error)")
-            }
+        let snapshots = CaptureService.captureAllScreens()
+        guard !snapshots.isEmpty else {
+            NSLog("Capture failed: no displays returned a snapshot (permission?)")
+            return
         }
+        let controller = OverlayController(snapshots: snapshots) { [weak self] result in
+            self?.overlay = nil
+            if let result = result { OverlayController.handleSelectionResult(result) }
+        }
+        self.overlay = controller
+        controller.show()
     }
 
     @objc private func openConfig() {

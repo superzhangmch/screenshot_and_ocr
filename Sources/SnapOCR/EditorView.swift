@@ -45,7 +45,7 @@ final class EditorView: NSView {
     /// the snapshot for the new rect and replaces the base image.
     var onResizeEnded: ((NSRect) -> Void)?
 
-    var tool: Tool = .line {
+    var tool: Tool = .freehand {
         didSet {
             commitActiveTextField()
             // Switching away from select clears the visual highlight to avoid confusion;
@@ -56,7 +56,7 @@ final class EditorView: NSView {
         }
     }
     var strokeColor: NSColor = .systemRed
-    var strokeWidth: CGFloat = 3
+    var strokeWidth: CGFloat = 1
 
     init(image: CGImage, frame: NSRect) {
         self.baseImage = image

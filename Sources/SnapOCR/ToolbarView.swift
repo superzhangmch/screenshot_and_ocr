@@ -17,7 +17,7 @@ final class ToolbarView: NSView {
     ]
     static let widthPresets: [CGFloat] = [1, 2, 3, 5, 8]
     private(set) var currentColor: NSColor = .systemRed
-    private(set) var currentWidth: CGFloat = 3
+    private(set) var currentWidth: CGFloat = 1   // thinnest preset
 
     private struct Item { let symbol: String; let label: String; let tool: ToolbarTool }
     private let items: [Item] = [
@@ -89,8 +89,8 @@ final class ToolbarView: NSView {
             addSubview(b)
             toolButtons.append(b)
         }
-        // Visually mark "line" as the default active tool.
-        highlight(tool: .line)
+        // Visually mark "freehand" (pencil) as the default active tool.
+        highlight(tool: .freehand)
     }
     required init?(coder: NSCoder) { fatalError() }
 
