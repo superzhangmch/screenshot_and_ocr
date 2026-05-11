@@ -42,6 +42,9 @@ final class EditorView: NSView {
     private var draggingHandle: ResizeHandle?
     private var anchorWindowFrame: NSRect = .zero
     private var anchorMouseScreen: NSPoint = .zero
+    /// True while the user is dragging empty area in select mode to move the whole
+    /// selection box. Reuses anchorWindowFrame + anchorMouseScreen.
+    private var draggingSelection: Bool = false
 
     /// Fired continuously while the user resizes via a handle (live preview).
     /// The new editor window frame in screen coordinates.
@@ -285,9 +288,15 @@ final class EditorView: NSView {
                 draggingAnnotationIndex = idx
                 dragLastPoint = p
                 NSCursor.closedHand.push()
-            } else {
-                selectedAnnotationIndex = nil
+                needsDisplay = true
+                return
             }
+            // Empty area in select mode → start dragging the whole selection box.
+            selectedAnnotationIndex = nil
+            draggingSelection = true
+            anchorWindowFrame = window?.frame ?? .zero
+            anchorMouseScreen = window?.convertPoint(toScreen: event.locationInWindow) ?? .zero
+            NSCursor.closedHand.push()
             needsDisplay = true
             return
         }
@@ -316,6 +325,17 @@ final class EditorView: NSView {
             applyNewWindowFrame(newFrame)
             return
         }
+        // Select-mode empty-area drag → move the whole selection box (no resize).
+        if draggingSelection, let win = window {
+            let mouseScreen = win.convertPoint(toScreen: event.locationInWindow)
+            let dx = mouseScreen.x - anchorMouseScreen.x
+            let dy = mouseScreen.y - anchorMouseScreen.y
+            var f = anchorWindowFrame
+            f.origin.x += dx
+            f.origin.y += dy
+            applyNewWindowFrame(f)
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         // Dragging an annotation takes priority over tool-specific drag gestures.
         if let idx = draggingAnnotationIndex, idx < annotations.count {
@@ -339,6 +359,16 @@ final class EditorView: NSView {
         // Resize finished — fire the "ended" callback so the controller can re-crop.
         if draggingHandle != nil {
             draggingHandle = nil
+            if let frame = window?.frame {
+                let h = Self.halo
+                onResizeEnded?(frame.insetBy(dx: h, dy: h))
+            }
+            return
+        }
+        // Selection-box move finished — same end-of-resize path (re-crop new region).
+        if draggingSelection {
+            draggingSelection = false
+            NSCursor.pop()
             if let frame = window?.frame {
                 let h = Self.halo
                 onResizeEnded?(frame.insetBy(dx: h, dy: h))

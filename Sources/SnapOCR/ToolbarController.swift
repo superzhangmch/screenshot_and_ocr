@@ -152,10 +152,18 @@ final class ToolbarController: NSObject {
     private func toolbarFrame(below selection: NSRect) -> NSRect {
         let tbHeight: CGFloat = 36
         let tbWidth = toolbarView?.intrinsicContentSize.width ?? 360
+        let scr = result.screen.frame
+        // Default: BELOW the selection (selection.minY is the bottom edge in Y-up).
         var f = NSRect(x: selection.minX,
                        y: selection.minY - tbHeight - 6,
                        width: tbWidth, height: tbHeight)
-        if f.minY < (result.screen.frame.minY + 4) {
+        // If that would clip the bottom of the screen, place it ABOVE the selection.
+        if f.minY < scr.minY + 4 {
+            f.origin.y = selection.maxY + 6
+        }
+        // If "above" would also clip the top (rare — near-fullheight selection),
+        // fall back to inside the selection at the bottom edge.
+        if f.maxY > scr.maxY - 4 {
             f.origin.y = selection.minY + 6
         }
         return f
@@ -316,22 +324,36 @@ extension ToolbarController {
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
         let tv = NSTextView(frame: scroll.bounds)
-        tv.isEditable = true
-        tv.isRichText = false
+        // Non-editable so a single click on a .link range opens the URL instead of
+        // moving the caret. User can still select text and use the Copy button.
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = true
         tv.font = .systemFont(ofSize: 13)
+        // Make .link ranges open in default browser on click.
+        tv.linkTextAttributes = [
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand
+        ]
         tv.string = initialText
         tv.autoresizingMask = [.width]
         scroll.documentView = tv
 
         let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyOCRText(_:)))
-        copyBtn.frame = NSRect(x: 360, y: 8, width: 90, height: 28)
+        copyBtn.frame = NSRect(x: 260, y: 8, width: 90, height: 28)
         copyBtn.bezelStyle = .rounded
         objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
+
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeOCRPopup(_:)))
+        closeBtn.frame = NSRect(x: 360, y: 8, width: 90, height: 28)
+        closeBtn.bezelStyle = .rounded
 
         let container = NSView(frame: win.contentView!.bounds)
         container.autoresizingMask = [.width, .height]
         container.addSubview(scroll)
         container.addSubview(copyBtn)
+        container.addSubview(closeBtn)
         win.contentView = container
 
         let sel = result.globalRect
@@ -345,9 +367,31 @@ extension ToolbarController {
     }
 
     private func updateOCRPopup(_ win: NSWindow, text: String) {
-        if let scroll = win.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
-           let tv = scroll.documentView as? NSTextView {
-            tv.string = text
+        guard let scroll = win.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let tv = scroll.documentView as? NSTextView else { return }
+        // Build an attributed string with .link attributes on any detected URLs so
+        // they render underlined and are clickable (NSTextView opens .link via NSWorkspace).
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.textColor
+        ]
+        let s = NSMutableAttributedString(string: text, attributes: attrs)
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+            let full = NSRange(location: 0, length: (text as NSString).length)
+            detector.enumerateMatches(in: text, range: full) { m, _, _ in
+                if let m = m, let url = m.url {
+                    s.addAttribute(.link, value: url, range: m.range)
+                }
+            }
+        }
+        tv.textStorage?.setAttributedString(s)
+    }
+
+    @objc private func closeOCRPopup(_ sender: NSButton) {
+        if let win = sender.window {
+            win.orderOut(nil)
+            win.contentView = nil
+            if ocrPopup === win { ocrPopup = nil }
         }
     }
 
