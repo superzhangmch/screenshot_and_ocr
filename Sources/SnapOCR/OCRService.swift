@@ -41,7 +41,7 @@ enum OCRService {
                             "role": "user",
                             "content": [
                                 ["type": "text",
-                                 "text": "Extract ALL text visible in this image. Preserve original line breaks and reading order. Output ONLY the extracted text — no commentary, no markdown fences."],
+                                 "text": "Extract ALL text visible in this image VERBATIM. Preserve indentation and inner whitespace; use natural line breaks. If the source has visible STRUCTURE — headings, bullet / numbered lists, tables, code blocks — output it using equivalent Markdown (#, -, 1., |, ```). For plain prose with no structure, output plain text. Do NOT wrap the entire response in a code fence or blockquote. Output ONLY the extracted/formatted text — no commentary, no language tags."],
                                 ["type": "image_url",
                                  "image_url": ["url": dataURL]]
                             ]
