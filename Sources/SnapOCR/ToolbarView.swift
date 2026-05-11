@@ -1,6 +1,6 @@
 import AppKit
 
-enum ToolbarTool { case select, line, freehand, text, ocrLocal, ocrLLM, undo, redo, copy, save, close }
+enum ToolbarTool { case select, line, freehand, text, mosaic, ocrLocal, ocrLLM, undo, redo, copy, save, close }
 
 protocol ToolbarViewDelegate: AnyObject {
     func toolbar(_ tb: ToolbarView, didSelect tool: ToolbarTool)
@@ -25,6 +25,7 @@ final class ToolbarView: NSView {
         Item(symbol: "line.diagonal",         label: "Line",     tool: .line),
         Item(symbol: "scribble.variable",     label: "Pencil",   tool: .freehand),
         Item(symbol: "textformat",            label: "Text",     tool: .text),
+        Item(symbol: "square.grid.3x3.fill",  label: "Mosaic (redact)", tool: .mosaic),
         Item(symbol: "text.viewfinder",       label: "OCR (Local · Apple Vision · fast)", tool: .ocrLocal),
         Item(symbol: "sparkles",              label: "OCR (LLM · slower, better on hard cases)", tool: .ocrLLM),
         Item(symbol: "arrow.uturn.backward",  label: "Undo (⌘Z)",tool: .undo),
@@ -104,7 +105,7 @@ final class ToolbarView: NSView {
 
     @objc private func tap(_ sender: NSButton) {
         let tool = items[sender.tag].tool
-        if tool == .select || tool == .line || tool == .freehand || tool == .text {
+        if tool == .select || tool == .line || tool == .freehand || tool == .text || tool == .mosaic {
             highlight(tool: tool)
         }
         delegate?.toolbar(self, didSelect: tool)

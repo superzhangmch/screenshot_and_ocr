@@ -12,7 +12,7 @@ enum ResizeHandle {
 }
 
 final class EditorView: NSView {
-    enum Tool { case select, line, freehand, text }
+    enum Tool { case select, line, freehand, text, mosaic }
 
     /// Invisible "halo" pad around the visible selection. The editor window is sized
     /// `selection.insetBy(-halo, -halo)` so clicks up to `halo` pt OUTSIDE the visible
@@ -26,6 +26,8 @@ final class EditorView: NSView {
     private var lineDragStart: NSPoint?
     private var liveLineEnd: NSPoint?
     private var liveStrokePoints: [NSPoint] = []
+    private var mosaicDragStart: NSPoint?
+    private var liveMosaicRect: NSRect?
 
     /// Currently selected annotation (highlighted with a dashed outline). Click an
     /// annotation to select; click empty space to deselect; press Delete to remove.
@@ -320,6 +322,9 @@ final class EditorView: NSView {
             liveStrokePoints = [p]
         case .text:
             dropTextField(at: p)
+        case .mosaic:
+            mosaicDragStart = p
+            liveMosaicRect = NSRect(origin: p, size: .zero)
         }
     }
 
@@ -360,6 +365,11 @@ final class EditorView: NSView {
             liveLineEnd = pc; needsDisplay = true
         case .freehand where !liveStrokePoints.isEmpty:
             liveStrokePoints.append(pc); needsDisplay = true
+        case .mosaic where mosaicDragStart != nil:
+            let s = mosaicDragStart!
+            liveMosaicRect = NSRect(x: min(s.x, pc.x), y: min(s.y, pc.y),
+                                    width: abs(pc.x - s.x), height: abs(pc.y - s.y))
+            needsDisplay = true
         default: break
         }
     }
@@ -406,6 +416,12 @@ final class EditorView: NSView {
             liveStrokePoints.removeAll()
         case .text:
             break
+        case .mosaic:
+            if let r = liveMosaicRect, r.width >= 5, r.height >= 5 {
+                pushAnnotation(.mosaic(rect: r))
+            }
+            mosaicDragStart = nil
+            liveMosaicRect = nil
         }
         needsDisplay = true
     }
@@ -557,12 +573,17 @@ final class EditorView: NSView {
         //    can never bleed into the invisible halo padding.
         ctx.saveGState()
         ctx.clip(to: selectionInsetRect)
-        for a in annotations { a.draw(in: ctx) }
+        for a in annotations {
+            a.draw(in: ctx, baseImage: baseImage, selRect: selectionInsetRect)
+        }
         if let s = lineDragStart, let e = liveLineEnd {
             Annotation.line(from: s, to: e, color: strokeColor, width: strokeWidth).draw(in: ctx)
         }
         if liveStrokePoints.count >= 2 {
             Annotation.stroke(points: liveStrokePoints, color: strokeColor, width: strokeWidth).draw(in: ctx)
+        }
+        if let r = liveMosaicRect, r.width > 0, r.height > 0 {
+            Annotation.mosaic(rect: r).draw(in: ctx, baseImage: baseImage, selRect: selectionInsetRect)
         }
         ctx.restoreGState()
 
@@ -601,7 +622,7 @@ final class EditorView: NSView {
         ctx.translateBy(x: -sel.minX, y: -sel.minY)
         // baseImage's natural size matches the selection rect, so draw it there.
         ctx.draw(baseImage, in: sel)
-        for a in annotations { a.draw(in: ctx) }
+        for a in annotations { a.draw(in: ctx, baseImage: baseImage, selRect: sel) }
         return ctx.makeImage()
     }
 }
@@ -710,6 +731,9 @@ enum Annotation {
     case line(from: NSPoint, to: NSPoint, color: NSColor, width: CGFloat)
     case stroke(points: [NSPoint], color: NSColor, width: CGFloat)
     case text(string: String, frame: NSRect, color: NSColor, font: NSFont)
+    /// Redact a rectangular region by pixelating the underlying screenshot pixels.
+    /// `rect` is in editor-local coords; rendering needs the baseImage + selection rect.
+    case mosaic(rect: NSRect)
 
     /// Hit-test rectangle for text annotations (nil for non-text). Padded slightly so
     /// click targets are forgiving.
@@ -734,6 +758,8 @@ enum Annotation {
             return NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
         case .text(_, let frame, _, _):
             return frame
+        case .mosaic(let rect):
+            return rect
         }
     }
 
@@ -753,6 +779,8 @@ enum Annotation {
             return false
         case .text(_, let frame, _, _):
             return frame.insetBy(dx: -4, dy: -4).contains(p)
+        case .mosaic(let rect):
+            return rect.contains(p)
         }
     }
 
@@ -765,17 +793,19 @@ enum Annotation {
             return .stroke(points: pts, color: color, width: w)
         case .text(let s, let f, _, let font):
             return .text(string: s, frame: f, color: color, font: font)
+        case .mosaic:
+            return self   // mosaic has no color
         }
     }
 
-    /// Replace the stroke width (line/stroke only — text is unchanged).
+    /// Replace the stroke width (line/stroke only — text + mosaic are unchanged).
     func withWidth(_ width: CGFloat) -> Annotation {
         switch self {
         case .line(let a, let b, let c, _):
             return .line(from: a, to: b, color: c, width: width)
         case .stroke(let pts, let c, _):
             return .stroke(points: pts, color: c, width: width)
-        case .text:
+        case .text, .mosaic:
             return self
         }
     }
@@ -795,6 +825,9 @@ enum Annotation {
                          frame: NSRect(x: frame.minX + dx, y: frame.minY + dy,
                                        width: frame.width, height: frame.height),
                          color: color, font: font)
+        case .mosaic(let rect):
+            return .mosaic(rect: NSRect(x: rect.minX + dx, y: rect.minY + dy,
+                                        width: rect.width, height: rect.height))
         }
     }
 
@@ -808,7 +841,9 @@ enum Annotation {
         return hypot(p.x - cx, p.y - cy)
     }
 
-    func draw(in ctx: CGContext) {
+    /// `baseImage` + `selRect` are required only for `.mosaic` (it pixelates the screenshot
+    /// pixels in its rect); other annotations ignore them.
+    func draw(in ctx: CGContext, baseImage: CGImage? = nil, selRect: NSRect? = nil) {
         switch self {
         case .line(let a, let b, let color, let width):
             ctx.saveGState()
@@ -848,6 +883,52 @@ enum Annotation {
                 lineStr.draw(at: NSPoint(x: frame.minX, y: baseline))
             }
             NSGraphicsContext.restoreGraphicsState()
+        case .mosaic(let rect):
+            Annotation.renderMosaic(rect: rect, in: ctx,
+                                     baseImage: baseImage, selRect: selRect)
         }
+    }
+
+    /// Pixelate the screenshot pixels that fall within `rect`. The trick is to draw
+    /// the relevant slice of `baseImage` into a tiny CGContext (averaging colors),
+    /// then draw the small image back out at the original size with nearest-neighbor
+    /// interpolation — that produces chunky blocks.
+    private static func renderMosaic(rect: NSRect,
+                                      in ctx: CGContext,
+                                      baseImage: CGImage?,
+                                      selRect: NSRect?) {
+        guard let baseImage = baseImage, let selRect = selRect,
+              rect.width > 0, rect.height > 0 else { return }
+        // Map editor-local rect → pixel rect inside baseImage (baseImage is at native
+        // retina resolution; selRect is in points and matches baseImage's natural size).
+        let scaleX = CGFloat(baseImage.width)  / selRect.width
+        let scaleY = CGFloat(baseImage.height) / selRect.height
+        let pixelRect = CGRect(
+            x: (rect.minX - selRect.minX) * scaleX,
+            y: (selRect.maxY - rect.maxY) * scaleY,    // Y-flipped because CGImage is top-down
+            width:  rect.width  * scaleX,
+            height: rect.height * scaleY
+        ).integral
+        guard pixelRect.width > 0, pixelRect.height > 0,
+              let cropped = baseImage.cropping(to: pixelRect) else { return }
+
+        // ~10pt blocks. Each cell in the small bitmap = one chunky block on screen.
+        let cellSize: CGFloat = 10
+        let cellsX = max(1, Int(rect.width  / cellSize))
+        let cellsY = max(1, Int(rect.height / cellSize))
+
+        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let small = CGContext(data: nil, width: cellsX, height: cellsY,
+                                    bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return }
+        small.interpolationQuality = .medium   // averaging while downsampling
+        small.draw(cropped, in: CGRect(x: 0, y: 0, width: cellsX, height: cellsY))
+        guard let smallImg = small.makeImage() else { return }
+
+        ctx.saveGState()
+        ctx.interpolationQuality = .none      // upscale → chunky blocks
+        ctx.draw(smallImg, in: rect)
+        ctx.restoreGState()
     }
 }

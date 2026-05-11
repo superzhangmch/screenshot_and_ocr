@@ -206,6 +206,7 @@ extension ToolbarController: ToolbarViewDelegate {
         case .line:     editorView.tool = .line
         case .freehand: editorView.tool = .freehand
         case .text:     editorView.tool = .text
+        case .mosaic:   editorView.tool = .mosaic
         case .undo:     editorView.undo()
         case .redo:     editorView.redo()
         case .ocrLocal: runLocalOCR()
