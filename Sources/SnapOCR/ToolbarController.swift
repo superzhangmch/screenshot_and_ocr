@@ -41,7 +41,12 @@ final class ToolbarController: NSObject {
         // are interactive while the gray dim + border stay visible behind them.
         let aboveOverlay = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
 
-        let frame = result.globalRect
+        // The visible selection is `result.globalRect`. The editor window is sized
+        // `selection + halo` so users can grab resize handles slightly outside the
+        // visible corner. EditorView handles the inset accounting internally.
+        let h = EditorView.halo
+        let selection = result.globalRect
+        let frame = selection.insetBy(dx: -h, dy: -h)
         imageWindow = EditorWindow(contentRect: frame, styleMask: [.borderless],
                                    backing: .buffered, defer: false)
         // Window must be non-opaque + clear-bg for the overlay underneath to show through —
@@ -82,7 +87,8 @@ final class ToolbarController: NSObject {
 
         toolbarView = ToolbarView()
         toolbarView.delegate = self
-        let tbFrame = toolbarFrame(below: frame)
+        // Position toolbar below the VISIBLE selection (not the halo-padded editor).
+        let tbFrame = toolbarFrame(below: selection)
         toolbarWindow = NSWindow(contentRect: tbFrame, styleMask: [.borderless],
                                  backing: .buffered, defer: false)
         toolbarWindow.isOpaque = false
@@ -194,7 +200,8 @@ extension ToolbarController: ToolbarViewDelegate {
         case .text:     editorView.tool = .text
         case .undo:     editorView.undo()
         case .redo:     editorView.redo()
-        case .ocr:      runOCR()
+        case .ocrLocal: runLocalOCR()
+        case .ocrLLM:   runOCR()
         case .copy:     copyEditedImage()
         case .save:     saveEditedImage()
         case .close:    dismiss()
@@ -238,6 +245,31 @@ extension ToolbarController {
         }
     }
 
+    /// On-device OCR via Apple Vision. Synchronous-ish (runs on a background queue,
+    /// no network), usually 50-200ms. Lighter than LLM-OCR for normal text.
+    private func runLocalOCR() {
+        guard let img = editorView.flattenedCGImage() else { return }
+        if let prev = ocrPopup {
+            prev.orderOut(nil)
+            prev.contentView = nil
+        }
+        let popup = makeOCRPopup(initialText: "Running local OCR…")
+        ocrPopup = popup
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: String
+            do {
+                let text = try VisionOCRService.recognize(image: img)
+                result = text.isEmpty ? "(No text detected)" : text
+            } catch {
+                result = "OCR failed: \(error.localizedDescription)"
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.ocrPopup === popup else { return }
+                self.updateOCRPopup(popup, text: result)
+            }
+        }
+    }
+
     private func runOCR() {
         guard let img = editorView.flattenedCGImage() else { return }
         // If a previous OCR popup is still around (user clicked OCR twice), tear it
@@ -247,7 +279,7 @@ extension ToolbarController {
             prev.orderOut(nil)
             prev.contentView = nil
         }
-        let popup = makeOCRPopup(initialText: "Running OCR…")
+        let popup = makeOCRPopup(initialText: "Running LLM OCR…")
         ocrPopup = popup
         Task { @MainActor in
             var accum = ""
@@ -323,6 +355,13 @@ extension ToolbarController {
         if let tv = objc_getAssociatedObject(sender, &OCRPopupKey.tv) as? NSTextView {
             ClipboardService.copy(text: tv.string)
             flashHUD("Text copied")
+        }
+        // Close the popup after copying (per request: don't leave a window hanging
+        // around once the user's grabbed the text they wanted).
+        if let win = sender.window {
+            win.orderOut(nil)
+            win.contentView = nil
+            if ocrPopup === win { ocrPopup = nil }
         }
     }
 

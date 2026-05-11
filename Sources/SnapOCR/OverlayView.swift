@@ -19,7 +19,7 @@ final class OverlayView: NSView {
         needsDisplay = true
     }
 
-    private let dimAlpha: CGFloat = 0.45
+    private let dimAlpha: CGFloat = 0.65
     private let borderColor = NSColor.systemBlue
     private let borderWidth: CGFloat = 1.5
 

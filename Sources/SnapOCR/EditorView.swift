@@ -14,6 +14,11 @@ enum ResizeHandle {
 final class EditorView: NSView {
     enum Tool { case select, line, freehand, text }
 
+    /// Invisible "halo" pad around the visible selection. The editor window is sized
+    /// `selection.insetBy(-halo, -halo)` so clicks up to `halo` pt OUTSIDE the visible
+    /// corner still land on the editor and can be picked up by the resize hit-test.
+    static let halo: CGFloat = 20
+
     private(set) var baseImage: CGImage
     private var annotations: [Annotation] = []
     private var redoStack: [Annotation] = []
@@ -173,13 +178,21 @@ final class EditorView: NSView {
         needsDisplay = true
     }
 
-    /// Generous corner-first hit test. The 4 corners get a 30pt Euclidean radius (the
-    /// closest corner wins if multiple match — avoids ambiguity on small selections).
-    /// The 4 edge midpoints fall back to a 14pt radius after corners miss.
+    /// The visible selection rectangle inside the editor view's bounds (which extends
+    /// `halo` pt past it on each side).
+    private var selectionInsetRect: NSRect {
+        bounds.insetBy(dx: Self.halo, dy: Self.halo)
+    }
+
+    /// Generous corner-first hit test. Corners use a 20pt Euclidean radius (the
+    /// closest corner wins if multiple match). Edge midpoints fall back to 12pt.
+    /// Anchored on the SELECTION corners, not the editor's outer bounds — the editor
+    /// extends `halo` pt outside the selection so clicks `halo` pt past a corner
+    /// still register.
     private func hitTestResizeHandle(at p: NSPoint) -> ResizeHandle? {
-        let r = bounds
-        let cornerR: CGFloat = 15
-        let edgeR:   CGFloat = 10
+        let r = selectionInsetRect
+        let cornerR: CGFloat = 20
+        let edgeR:   CGFloat = 12
 
         let corners: [(ResizeHandle, NSPoint)] = [
             (.topLeft,     NSPoint(x: r.minX, y: r.maxY)),
@@ -222,8 +235,9 @@ final class EditorView: NSView {
         case .bottom:                       f.origin.y += dy;                     f.size.height -= dy
         case .bottomRight:                  f.origin.y += dy; f.size.width += dx; f.size.height -= dy
         }
-        // Don't allow flipping or sub-minimum sizes.
-        let minSide: CGFloat = 30
+        // Don't allow flipping or sub-minimum sizes. min visible selection = 30pt,
+        // plus halo on both sides = 30 + 2*halo.
+        let minSide: CGFloat = 30 + 2 * Self.halo
         if f.size.width  < minSide { f.size.width  = minSide }
         if f.size.height < minSide { f.size.height = minSide }
         return NSRect(x: f.origin.x.rounded(),
@@ -243,6 +257,11 @@ final class EditorView: NSView {
             anchorMouseScreen = window?.convertPoint(toScreen: event.locationInWindow) ?? .zero
             return
         }
+        // Clicks in the halo (outside the visible selection) and not on a handle: ignore.
+        // Prevents drawing/typing in the "invisible padding" area where the user is just
+        // approaching a corner but missed it.
+        if !selectionInsetRect.contains(p) { return }
+
         // Any click commits the in-flight text field first.
         commitActiveTextField()
 
@@ -321,7 +340,8 @@ final class EditorView: NSView {
         if draggingHandle != nil {
             draggingHandle = nil
             if let frame = window?.frame {
-                onResizeEnded?(frame)
+                let h = Self.halo
+                onResizeEnded?(frame.insetBy(dx: h, dy: h))
             }
             return
         }
@@ -351,7 +371,7 @@ final class EditorView: NSView {
     }
 
     private func drawResizeHandles(in ctx: CGContext) {
-        let r = bounds
+        let r = selectionInsetRect   // visible selection corners, not the outer halo
         let s: CGFloat = 8
         let pts: [NSPoint] = [
             NSPoint(x: r.minX, y: r.minY), NSPoint(x: r.midX, y: r.minY), NSPoint(x: r.maxX, y: r.minY),
@@ -383,7 +403,10 @@ final class EditorView: NSView {
         // at the same screen position their local coords must shift by (-dx, -dy).
         translateAllAnnotations(dx: -dx, dy: -dy)
 
-        onResize?(newFrame)
+        // The window is halo-padded, but downstream (toolbar position, overlay re-freeze,
+        // re-crop) wants the VISIBLE selection rect. Strip the halo before forwarding.
+        let h = Self.halo
+        onResize?(newFrame.insetBy(dx: h, dy: h))
     }
 
     /// Returns the index of the topmost text annotation containing `p`, or nil.
@@ -520,14 +543,22 @@ final class EditorView: NSView {
     func flattenedCGImage() -> CGImage? {
         commitActiveTextField()
         let scale: CGFloat = 2
-        let w = Int(bounds.width * scale)
-        let h = Int(bounds.height * scale)
-        guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+        // Output is the VISIBLE selection only (no halo) — even though our bounds
+        // include the halo for hit-test reach. The baseImage was cropped at the
+        // visible-selection size and corresponds 1:1 with selectionInsetRect.
+        let sel = selectionInsetRect
+        let w = Int(sel.width * scale)
+        let h = Int(sel.height * scale)
+        guard w > 0, h > 0,
+              let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: cs,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.scaleBy(x: scale, y: scale)
-        ctx.draw(baseImage, in: bounds)
+        // Shift so the selection's origin maps to (0,0) in the output bitmap.
+        ctx.translateBy(x: -sel.minX, y: -sel.minY)
+        // baseImage's natural size matches the selection rect, so draw it there.
+        ctx.draw(baseImage, in: sel)
         for a in annotations { a.draw(in: ctx) }
         return ctx.makeImage()
     }
