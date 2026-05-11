@@ -187,6 +187,14 @@ final class EditorView: NSView {
         bounds.insetBy(dx: Self.halo, dy: Self.halo)
     }
 
+    /// Clamp a point to the visible selection so drawing tools can't stray into the
+    /// invisible halo area (mouseDragged keeps sending events outside the visible box).
+    private func clampToSelection(_ p: NSPoint) -> NSPoint {
+        let r = selectionInsetRect
+        return NSPoint(x: max(r.minX, min(p.x, r.maxX)),
+                       y: max(r.minY, min(p.y, r.maxY)))
+    }
+
     /// Generous corner-first hit test. Corners use a 20pt Euclidean radius (the
     /// closest corner wins if multiple match). Edge midpoints fall back to 12pt.
     /// Anchored on the SELECTION corners, not the editor's outer bounds — the editor
@@ -346,11 +354,12 @@ final class EditorView: NSView {
             needsDisplay = true
             return
         }
+        let pc = clampToSelection(p)
         switch tool {
         case .line where lineDragStart != nil:
-            liveLineEnd = p; needsDisplay = true
+            liveLineEnd = pc; needsDisplay = true
         case .freehand where !liveStrokePoints.isEmpty:
-            liveStrokePoints.append(p); needsDisplay = true
+            liveStrokePoints.append(pc); needsDisplay = true
         default: break
         }
     }
@@ -381,12 +390,13 @@ final class EditorView: NSView {
             NSCursor.pop()
             return
         }
+        let pc = clampToSelection(p)
         switch tool {
         case .select:
             break
         case .line:
-            if let s = lineDragStart, hypot(p.x - s.x, p.y - s.y) >= 2 {
-                pushAnnotation(.line(from: s, to: p, color: strokeColor, width: strokeWidth))
+            if let s = lineDragStart, hypot(pc.x - s.x, pc.y - s.y) >= 2 {
+                pushAnnotation(.line(from: s, to: pc, color: strokeColor, width: strokeWidth))
             }
             lineDragStart = nil; liveLineEnd = nil
         case .freehand:
@@ -543,14 +553,24 @@ final class EditorView: NSView {
         ctx.setFillColor(NSColor(white: 0, alpha: 0.005).cgColor)
         ctx.fill(bounds)
 
-        // 2) Annotations only — the screenshot pixels come from the overlay underneath.
+        // 2) Annotations + live previews — clipped to the visible selection so they
+        //    can never bleed into the invisible halo padding.
+        ctx.saveGState()
+        ctx.clip(to: selectionInsetRect)
         for a in annotations { a.draw(in: ctx) }
+        if let s = lineDragStart, let e = liveLineEnd {
+            Annotation.line(from: s, to: e, color: strokeColor, width: strokeWidth).draw(in: ctx)
+        }
+        if liveStrokePoints.count >= 2 {
+            Annotation.stroke(points: liveStrokePoints, color: strokeColor, width: strokeWidth).draw(in: ctx)
+        }
+        ctx.restoreGState()
 
-        // 3) Resize handles at the editor bounds corners + edge midpoints. Visible while
-        //    the editor is open so the user can grab them to resize the captured area.
+        // 3) Resize handles at the selection corners + edge midpoints (NOT clipped —
+        //    handles sit on the selection border).
         drawResizeHandles(in: ctx)
 
-        // 3) Selection highlight (dashed blue outline around the chosen annotation's bbox).
+        // 4) Selection highlight (dashed blue outline around the chosen annotation's bbox).
         if let idx = selectedAnnotationIndex, idx < annotations.count {
             let bbox = annotations[idx].boundingRect().insetBy(dx: -4, dy: -4)
             ctx.saveGState()
@@ -559,14 +579,6 @@ final class EditorView: NSView {
             ctx.setLineDash(phase: 0, lengths: [4, 3])
             ctx.stroke(bbox)
             ctx.restoreGState()
-        }
-
-        // 4) Live previews for the in-progress line/stroke.
-        if let s = lineDragStart, let e = liveLineEnd {
-            Annotation.line(from: s, to: e, color: strokeColor, width: strokeWidth).draw(in: ctx)
-        }
-        if liveStrokePoints.count >= 2 {
-            Annotation.stroke(points: liveStrokePoints, color: strokeColor, width: strokeWidth).draw(in: ctx)
         }
     }
 
