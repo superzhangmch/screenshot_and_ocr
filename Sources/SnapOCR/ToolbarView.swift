@@ -17,7 +17,7 @@ final class ToolbarView: NSView {
     ]
     static let widthPresets: [CGFloat] = [1, 2, 3, 5, 8]
     private(set) var currentColor: NSColor = .systemRed
-    private(set) var currentWidth: CGFloat = 1   // thinnest preset
+    private(set) var currentWidth: CGFloat = 2
 
     private struct Item { let symbol: String; let label: String; let tool: ToolbarTool }
     private let items: [Item] = [

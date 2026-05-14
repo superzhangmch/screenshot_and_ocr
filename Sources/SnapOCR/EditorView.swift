@@ -66,7 +66,7 @@ final class EditorView: NSView {
         }
     }
     var strokeColor: NSColor = .systemRed
-    var strokeWidth: CGFloat = 1
+    var strokeWidth: CGFloat = 2
 
     init(image: CGImage, frame: NSRect) {
         self.baseImage = image
