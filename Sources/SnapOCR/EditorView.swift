@@ -12,7 +12,7 @@ enum ResizeHandle {
 }
 
 final class EditorView: NSView {
-    enum Tool { case select, line, freehand, text, mosaic }
+    enum Tool { case select, line, freehand, rectangle, text, mosaic }
 
     /// Invisible "halo" pad around the visible selection. The editor window is sized
     /// `selection.insetBy(-halo, -halo)` so clicks up to `halo` pt OUTSIDE the visible
@@ -28,6 +28,8 @@ final class EditorView: NSView {
     private var liveStrokePoints: [NSPoint] = []
     private var mosaicDragStart: NSPoint?
     private var liveMosaicRect: NSRect?
+    private var rectDragStart: NSPoint?
+    private var liveRect: NSRect?
 
     /// Currently selected annotation (highlighted with a dashed outline). Click an
     /// annotation to select; click empty space to deselect; press Delete to remove.
@@ -338,6 +340,9 @@ final class EditorView: NSView {
             lineDragStart = p; liveLineEnd = p
         case .freehand:
             liveStrokePoints = [p]
+        case .rectangle:
+            rectDragStart = p
+            liveRect = NSRect(origin: p, size: .zero)
         case .text:
             // Double-click on a committed text annotation → reopen it for editing.
             // (Single click still drops a new input.)
@@ -400,6 +405,11 @@ final class EditorView: NSView {
             liveMosaicRect = NSRect(x: min(s.x, pc.x), y: min(s.y, pc.y),
                                     width: abs(pc.x - s.x), height: abs(pc.y - s.y))
             needsDisplay = true
+        case .rectangle where rectDragStart != nil:
+            let s = rectDragStart!
+            liveRect = NSRect(x: min(s.x, pc.x), y: min(s.y, pc.y),
+                              width: abs(pc.x - s.x), height: abs(pc.y - s.y))
+            needsDisplay = true
         default: break
         }
     }
@@ -452,6 +462,13 @@ final class EditorView: NSView {
             }
             mosaicDragStart = nil
             liveMosaicRect = nil
+        case .rectangle:
+            if let r = liveRect, r.width >= 4, r.height >= 4 {
+                pushAnnotation(.rectangle(rect: r, color: strokeColor,
+                                          width: strokeWidth, cornerRadius: 6))
+            }
+            rectDragStart = nil
+            liveRect = nil
         }
         needsDisplay = true
     }
@@ -655,6 +672,10 @@ final class EditorView: NSView {
         }
         if let r = liveMosaicRect, r.width > 0, r.height > 0 {
             Annotation.mosaic(rect: r).draw(in: ctx, baseImage: baseImage, selRect: selectionInsetRect)
+        }
+        if let r = liveRect, r.width > 0, r.height > 0 {
+            Annotation.rectangle(rect: r, color: strokeColor, width: strokeWidth,
+                                 cornerRadius: 6).draw(in: ctx)
         }
         ctx.restoreGState()
 
@@ -940,8 +961,9 @@ enum Annotation {
     case stroke(points: [NSPoint], color: NSColor, width: CGFloat)
     case text(string: String, frame: NSRect, color: NSColor, font: NSFont)
     /// Redact a rectangular region by pixelating the underlying screenshot pixels.
-    /// `rect` is in editor-local coords; rendering needs the baseImage + selection rect.
     case mosaic(rect: NSRect)
+    /// Rounded-corner rectangle outline (stroke, no fill).
+    case rectangle(rect: NSRect, color: NSColor, width: CGFloat, cornerRadius: CGFloat)
 
     /// Hit-test rectangle for text annotations (nil for non-text). Padded slightly so
     /// click targets are forgiving.
@@ -968,6 +990,8 @@ enum Annotation {
             return frame
         case .mosaic(let rect):
             return rect
+        case .rectangle(let rect, _, _, _):
+            return rect
         }
     }
 
@@ -989,6 +1013,12 @@ enum Annotation {
             return frame.insetBy(dx: -4, dy: -4).contains(p)
         case .mosaic(let rect):
             return rect.contains(p)
+        case .rectangle(let rect, _, _, _):
+            // Hit if click is on the border (within tolerance). Inside-but-far-from-border
+            // doesn't select — that area belongs to the underlying screenshot.
+            let outer = rect.insetBy(dx: -tolerance, dy: -tolerance)
+            let inner = rect.insetBy(dx:  tolerance, dy:  tolerance)
+            return outer.contains(p) && !inner.contains(p)
         }
     }
 
@@ -1003,16 +1033,20 @@ enum Annotation {
             return .text(string: s, frame: f, color: color, font: font)
         case .mosaic:
             return self   // mosaic has no color
+        case .rectangle(let rect, _, let w, let cr):
+            return .rectangle(rect: rect, color: color, width: w, cornerRadius: cr)
         }
     }
 
-    /// Replace the stroke width (line/stroke only — text + mosaic are unchanged).
+    /// Replace the stroke width (line/stroke/rectangle — text + mosaic are unchanged).
     func withWidth(_ width: CGFloat) -> Annotation {
         switch self {
         case .line(let a, let b, let c, _):
             return .line(from: a, to: b, color: c, width: width)
         case .stroke(let pts, let c, _):
             return .stroke(points: pts, color: c, width: width)
+        case .rectangle(let rect, let c, _, let cr):
+            return .rectangle(rect: rect, color: c, width: width, cornerRadius: cr)
         case .text, .mosaic:
             return self
         }
@@ -1036,6 +1070,12 @@ enum Annotation {
         case .mosaic(let rect):
             return .mosaic(rect: NSRect(x: rect.minX + dx, y: rect.minY + dy,
                                         width: rect.width, height: rect.height))
+        case .rectangle(let rect, let c, let w, let cr):
+            return .rectangle(
+                rect: NSRect(x: rect.minX + dx, y: rect.minY + dy,
+                             width: rect.width, height: rect.height),
+                color: c, width: w, cornerRadius: cr
+            )
         }
     }
 
@@ -1097,6 +1137,22 @@ enum Annotation {
         case .mosaic(let rect):
             Annotation.renderMosaic(rect: rect, in: ctx,
                                      baseImage: baseImage, selRect: selRect)
+        case .rectangle(let rect, let color, let width, let cr):
+            ctx.saveGState()
+            ctx.setStrokeColor(color.cgColor)
+            ctx.setLineWidth(width)
+            // Inset the path by half the line width so the stroke doesn't clip the rect's
+            // outer edge; clamp corner radius so it doesn't exceed the shorter side / 2.
+            let inset = width / 2
+            let strokeRect = rect.insetBy(dx: inset, dy: inset)
+            let maxR = min(strokeRect.width, strokeRect.height) / 2
+            let radius = max(0, min(cr, maxR))
+            let path = CGPath(roundedRect: strokeRect,
+                              cornerWidth: radius, cornerHeight: radius,
+                              transform: nil)
+            ctx.addPath(path)
+            ctx.strokePath()
+            ctx.restoreGState()
         }
     }
 

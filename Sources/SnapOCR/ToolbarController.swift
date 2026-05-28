@@ -206,6 +206,7 @@ extension ToolbarController: ToolbarViewDelegate {
         case .select:   editorView.tool = .select
         case .line:     editorView.tool = .line
         case .freehand: editorView.tool = .freehand
+        case .rectangle: editorView.tool = .rectangle
         case .text:     editorView.tool = .text
         case .mosaic:   editorView.tool = .mosaic
         case .undo:     editorView.undo()
@@ -325,31 +326,39 @@ extension ToolbarController {
         tv.autoresizingMask = [.width]
         scroll.documentView = tv
 
+        // Three-button bottom row: [ Copy ]  [ Copy & Exit ]  [ Close ]
+        // "Copy & Exit" is the accent (default) action: copy text AND tear down the
+        // entire editor session (overlay, toolbar, popup) so the user goes straight
+        // back to wherever they were.
         let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyOCRText(_:)))
-        copyBtn.frame = NSRect(x: 260, y: 8, width: 90, height: 28)
+        copyBtn.frame = NSRect(x: 150, y: 8, width: 90, height: 28)
         copyBtn.bezelStyle = .rounded
-        // Default button: macOS paints it in the accent color and Return triggers it.
-        copyBtn.keyEquivalent = "\r"
-        // Make the label bolder so it visually pops vs Close.
-        copyBtn.attributedTitle = NSAttributedString(
-            string: "Copy",
+        objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
+
+        let copyExitBtn = NSButton(title: "Copy & Exit",
+                                    target: self, action: #selector(copyOCRTextAndExit(_:)))
+        copyExitBtn.frame = NSRect(x: 245, y: 8, width: 120, height: 28)
+        copyExitBtn.bezelStyle = .rounded
+        copyExitBtn.keyEquivalent = "\r"            // Return triggers this
+        copyExitBtn.attributedTitle = NSAttributedString(
+            string: "Copy & Exit",
             attributes: [
                 .foregroundColor: NSColor.white,
                 .font: NSFont.boldSystemFont(ofSize: 13)
             ]
         )
-        objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(copyExitBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
 
         let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeOCRPopup(_:)))
-        closeBtn.frame = NSRect(x: 360, y: 8, width: 90, height: 28)
+        closeBtn.frame = NSRect(x: 370, y: 8, width: 80, height: 28)
         closeBtn.bezelStyle = .rounded
-        // Esc also closes the popup.
-        closeBtn.keyEquivalent = "\u{1b}"
+        closeBtn.keyEquivalent = "\u{1b}"           // Esc
 
         let container = NSView(frame: win.contentView!.bounds)
         container.autoresizingMask = [.width, .height]
         container.addSubview(scroll)
         container.addSubview(copyBtn)
+        container.addSubview(copyExitBtn)
         container.addSubview(closeBtn)
         win.contentView = container
 
@@ -382,6 +391,14 @@ extension ToolbarController {
             }
         }
         tv.textStorage?.setAttributedString(s)
+    }
+
+    @objc private func copyOCRTextAndExit(_ sender: NSButton) {
+        if let tv = objc_getAssociatedObject(sender, &OCRPopupKey.tv) as? NSTextView {
+            ClipboardService.copy(text: tv.string)
+        }
+        // Tear down OCR popup + editor + toolbar + overlay all at once.
+        dismiss()
     }
 
     @objc private func closeOCRPopup(_ sender: NSButton) {
