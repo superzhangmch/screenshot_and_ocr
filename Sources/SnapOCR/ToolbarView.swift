@@ -1,6 +1,6 @@
 import AppKit
 
-enum ToolbarTool { case select, line, freehand, rectangle, text, mosaic, ocrLocal, ocrLLM, undo, redo, copy, close }
+enum ToolbarTool { case select, line, freehand, rectangle, text, mosaic, ocrLocal, ocrLLM, englishExplain, undo, redo, copy, close }
 
 protocol ToolbarViewDelegate: AnyObject {
     func toolbar(_ tb: ToolbarView, didSelect tool: ToolbarTool)
@@ -29,6 +29,7 @@ final class ToolbarView: NSView {
         Item(symbol: "square.grid.3x3.fill",  label: "Mosaic (redact)", tool: .mosaic),
         Item(symbol: "text.viewfinder",       label: "OCR (Local · Apple Vision · fast)", tool: .ocrLocal),
         Item(symbol: "sparkles",              label: "OCR (LLM · slower, better on hard cases)", tool: .ocrLLM),
+        Item(symbol: "character.book.closed", label: "Explain English (LLM)", tool: .englishExplain),
         Item(symbol: "arrow.uturn.backward",  label: "Undo (⌘Z)",tool: .undo),
         Item(symbol: "arrow.uturn.forward",   label: "Redo (⌘⇧Z)",tool: .redo),
         Item(symbol: "doc.on.clipboard",      label: "Copy",     tool: .copy),

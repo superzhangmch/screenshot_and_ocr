@@ -19,7 +19,11 @@ enum OCRError: LocalizedError {
 /// arrive so the popup can render text live instead of blocking on the full response.
 /// Endpoint, key, and model are read from Config (env vars or ~/.config/snapocr/config.json).
 enum OCRService {
-    static func recognize(image: CGImage) -> AsyncThrowingStream<String, Error> {
+    /// Default prompt for plain OCR — preserves layout / wraps Markdown for structure.
+    static let defaultPrompt = "Extract ALL text visible in this image VERBATIM. Preserve indentation and inner whitespace; use natural line breaks. If the source has visible STRUCTURE — headings, bullet / numbered lists, tables, code blocks — output it using equivalent Markdown (#, -, 1., |, ```). For plain prose with no structure, output plain text. Do NOT wrap the entire response in a code fence or blockquote. Output ONLY the extracted/formatted text — no commentary, no language tags."
+
+    static func recognize(image: CGImage,
+                          prompt: String = OCRService.defaultPrompt) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -40,8 +44,7 @@ enum OCRService {
                         "messages": [[
                             "role": "user",
                             "content": [
-                                ["type": "text",
-                                 "text": "Extract ALL text visible in this image VERBATIM. Preserve indentation and inner whitespace; use natural line breaks. If the source has visible STRUCTURE — headings, bullet / numbered lists, tables, code blocks — output it using equivalent Markdown (#, -, 1., |, ```). For plain prose with no structure, output plain text. Do NOT wrap the entire response in a code fence or blockquote. Output ONLY the extracted/formatted text — no commentary, no language tags."],
+                                ["type": "text", "text": prompt],
                                 ["type": "image_url",
                                  "image_url": ["url": dataURL]]
                             ]

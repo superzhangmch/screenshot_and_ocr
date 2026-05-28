@@ -176,21 +176,44 @@ final class ToolbarController: NSObject {
     }
 
     fileprivate func dismiss() {
+        dismiss(keepingPopup: false)
+    }
+
+    /// Tear down the capture session. If `keepingPopup` is true, the OCR/explainer popup
+    /// is left alive (held by `Self.standalonePopup`) so a deferred LLM call can still
+    /// stream into it after the editor / overlay are gone.
+    fileprivate func dismiss(keepingPopup: Bool) {
         if let m = localKeyMonitor { NSEvent.removeMonitor(m); localKeyMonitor = nil }
-        // Tear down windows + break contentView refs so AppKit / ARC can reclaim
-        // the editor's CGImage, NSTextView layout managers, etc. promptly.
         imageWindow?.orderOut(nil); imageWindow?.contentView = nil; imageWindow = nil
         toolbarWindow?.orderOut(nil); toolbarWindow?.contentView = nil; toolbarWindow = nil
-        ocrPopup?.orderOut(nil); ocrPopup?.contentView = nil; ocrPopup = nil
+        if !keepingPopup {
+            ocrPopup?.orderOut(nil); ocrPopup?.contentView = nil; ocrPopup = nil
+        } else if let popup = ocrPopup {
+            // Hand the popup over to a static slot so it survives the controller dying.
+            if let prev = Self.standalonePopup {
+                objc_setAssociatedObject(prev, &Self.controllerOwnerKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                prev.orderOut(nil); prev.contentView = nil
+            }
+            Self.standalonePopup = popup
+            // Pin self alive on the popup so its button targets stay valid until close.
+            objc_setAssociatedObject(popup, &Self.controllerOwnerKey, self, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            ocrPopup = nil
+        }
         editorView = nil
         toolbarView = nil
         ToolbarController.current = nil
         onClose()
-        // Hint to malloc to actually return free pages to the OS instead of caching them
-        // forever. This is what makes RSS shrink between captures (private memory was
-        // already stable; this just makes the visible "RSS climbing" trend stop).
         malloc_zone_pressure_relief(malloc_default_zone(), 0)
     }
+
+    /// Holds an OCR/explainer popup that should outlive its ToolbarController (e.g.
+    /// "Explain English" tears down the capture session immediately but keeps the
+    /// streaming result window on screen). Cleared when the user closes that popup.
+    static var standalonePopup: NSWindow?
+    /// Associated-object key — pins the controller alive on the standalone popup so
+    /// the popup's button targets (which point at the controller) stay valid until
+    /// the user closes the popup, even after the editor session has been torn down.
+    private static var controllerOwnerKey: UInt8 = 0
 }
 
 /// Custom NSWindow so the borderless editor accepts key events (needed for the ⌘Z monitor
@@ -213,6 +236,7 @@ extension ToolbarController: ToolbarViewDelegate {
         case .redo:     editorView.redo()
         case .ocrLocal: runLocalOCR()
         case .ocrLLM:   runOCR()
+        case .englishExplain: runEnglishExplainer()
         case .copy:     copyEditedImage()
         case .close:    dismiss()
         }
@@ -264,6 +288,57 @@ extension ToolbarController {
         }
     }
 
+    /// Explain difficult English in the captured region. Streams an LLM reply with
+     /// uncommon vocab / idioms / unusual usages / overall sentence meaning, in Chinese.
+     /// The capture session (editor + overlay) is torn down immediately — only the
+     /// streaming popup remains on screen so the user can keep using whatever app
+     /// they grabbed the text from.
+    private func runEnglishExplainer() {
+        guard let img = editorView.flattenedCGImage() else { return }
+        if let prev = ocrPopup { prev.orderOut(nil); prev.contentView = nil }
+        let popup = makeOCRPopup(initialText: "解读中…", explainerMode: true)
+        popup.title = "English explainer"
+        ocrPopup = popup
+
+        let prompt = """
+        请按以下顺序处理图中的英文:
+
+        1. 先抄录出英文原文 (类似 OCR). 只抄录用户真正关心的英文正文; 忽略无关内容 (UI 文字、按钮、广告、水印等), 也忽略被截断的、半句的、上一段或下一段的残缺片段. 凡是没有完整呈现在图中的文字 (任意一边被裁掉、显示不全), 一律忽略.
+
+        空一行.
+
+        2. 中文翻译 (自然些, 忠于原文).
+
+        空一行.
+
+        3. 用大白话简要 restate 一下这段话其实在说啥 (通俗复述, 抓重点, 不长篇, 也不是再翻一遍).
+
+        空一行.
+
+        4. 如果有真正难懂的地方 —— 不常见的词 / idiom, 不寻常的语法或搭配, 常见词的不熟悉含义 —— 简明解读. 简单常见的不用讲. 没有难点就不写这一段, 不要硬凑.
+
+        纯文本输出, 不要任何 Markdown 标记 (不要 #, *, **, `, -, 表格等). 用自然分段和换行表达结构. 不要序号小标题如 "1." "2." 也不要写"英文原文:" "翻译:" 这种 label. 直接按顺序给四块内容, 中间用空行分隔.
+        """
+
+        Task { @MainActor in
+            var accum = ""
+            do {
+                var first = true
+                for try await chunk in OCRService.recognize(image: img, prompt: prompt) {
+                    if first { accum = ""; first = false }
+                    accum += chunk
+                    self.updateOCRPopup(popup, text: accum)
+                }
+                if accum.isEmpty { self.updateOCRPopup(popup, text: "(无内容)") }
+            } catch {
+                self.updateOCRPopup(popup, text: "解读失败: \(error.localizedDescription)")
+            }
+        }
+
+        // Hand the popup off to the standalone slot and tear down editor + overlay.
+        dismiss(keepingPopup: true)
+    }
+
     private func runOCR() {
         guard let img = editorView.flattenedCGImage() else { return }
         // If a previous OCR popup is still around (user clicked OCR twice), tear it
@@ -293,7 +368,7 @@ extension ToolbarController {
         }
     }
 
-    private func makeOCRPopup(initialText: String) -> NSWindow {
+    private func makeOCRPopup(initialText: String, explainerMode: Bool = false) -> NSWindow {
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 320),
                            styleMask: [.titled, .closable, .resizable],
                            backing: .buffered, defer: false)
@@ -326,40 +401,56 @@ extension ToolbarController {
         tv.autoresizingMask = [.width]
         scroll.documentView = tv
 
-        // Three-button bottom row: [ Copy ]  [ Copy & Exit ]  [ Close ]
-        // "Copy & Exit" is the accent (default) action: copy text AND tear down the
-        // entire editor session (overlay, toolbar, popup) so the user goes straight
-        // back to wherever they were.
-        let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyOCRText(_:)))
-        copyBtn.frame = NSRect(x: 150, y: 8, width: 90, height: 28)
-        copyBtn.bezelStyle = .rounded
-        objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
-
-        let copyExitBtn = NSButton(title: "Copy & Exit",
-                                    target: self, action: #selector(copyOCRTextAndExit(_:)))
-        copyExitBtn.frame = NSRect(x: 245, y: 8, width: 120, height: 28)
-        copyExitBtn.bezelStyle = .rounded
-        copyExitBtn.keyEquivalent = "\r"            // Return triggers this
-        copyExitBtn.attributedTitle = NSAttributedString(
-            string: "Copy & Exit",
-            attributes: [
-                .foregroundColor: NSColor.white,
-                .font: NSFont.boldSystemFont(ofSize: 13)
-            ]
-        )
-        objc_setAssociatedObject(copyExitBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
-
-        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeOCRPopup(_:)))
-        closeBtn.frame = NSRect(x: 370, y: 8, width: 80, height: 28)
-        closeBtn.bezelStyle = .rounded
-        closeBtn.keyEquivalent = "\u{1b}"           // Esc
-
         let container = NSView(frame: win.contentView!.bounds)
         container.autoresizingMask = [.width, .height]
         container.addSubview(scroll)
-        container.addSubview(copyBtn)
-        container.addSubview(copyExitBtn)
-        container.addSubview(closeBtn)
+
+        if explainerMode {
+            // Explainer popup: just one Exit button. No copy actions — the user is here
+            // to read, not to capture text. Return AND Esc both close.
+            let exitBtn = NSButton(title: "Exit", target: self,
+                                    action: #selector(closeOCRPopup(_:)))
+            exitBtn.frame = NSRect(x: 360, y: 8, width: 90, height: 28)
+            exitBtn.bezelStyle = .rounded
+            exitBtn.keyEquivalent = "\r"
+            exitBtn.attributedTitle = NSAttributedString(
+                string: "Exit",
+                attributes: [
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.boldSystemFont(ofSize: 13)
+                ]
+            )
+            container.addSubview(exitBtn)
+        } else {
+            // OCR popup: [ Copy ]  [ Copy & Exit ]  [ Close ]
+            let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyOCRText(_:)))
+            copyBtn.frame = NSRect(x: 150, y: 8, width: 90, height: 28)
+            copyBtn.bezelStyle = .rounded
+            objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
+
+            let copyExitBtn = NSButton(title: "Copy & Exit",
+                                        target: self, action: #selector(copyOCRTextAndExit(_:)))
+            copyExitBtn.frame = NSRect(x: 245, y: 8, width: 120, height: 28)
+            copyExitBtn.bezelStyle = .rounded
+            copyExitBtn.keyEquivalent = "\r"
+            copyExitBtn.attributedTitle = NSAttributedString(
+                string: "Copy & Exit",
+                attributes: [
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.boldSystemFont(ofSize: 13)
+                ]
+            )
+            objc_setAssociatedObject(copyExitBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
+
+            let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeOCRPopup(_:)))
+            closeBtn.frame = NSRect(x: 370, y: 8, width: 80, height: 28)
+            closeBtn.bezelStyle = .rounded
+            closeBtn.keyEquivalent = "\u{1b}"
+
+            container.addSubview(copyBtn)
+            container.addSubview(copyExitBtn)
+            container.addSubview(closeBtn)
+        }
         win.contentView = container
 
         let sel = result.globalRect
@@ -397,15 +488,28 @@ extension ToolbarController {
         if let tv = objc_getAssociatedObject(sender, &OCRPopupKey.tv) as? NSTextView {
             ClipboardService.copy(text: tv.string)
         }
-        // Tear down OCR popup + editor + toolbar + overlay all at once.
-        dismiss()
+        if let win = sender.window, ToolbarController.standalonePopup === win {
+            // Editor + overlay are already gone (popup is in standalone mode); just close the popup.
+            dismissPopupWindow(win)
+        } else {
+            dismiss()
+        }
     }
 
     @objc private func closeOCRPopup(_ sender: NSButton) {
-        if let win = sender.window {
-            win.orderOut(nil)
-            win.contentView = nil
-            if ocrPopup === win { ocrPopup = nil }
+        if let win = sender.window { dismissPopupWindow(win) }
+    }
+
+    /// Close a popup window, clearing both `ocrPopup` and `standalonePopup` slots if
+    /// either points at it, and release the associated controller-pinning object.
+    private func dismissPopupWindow(_ win: NSWindow) {
+        win.orderOut(nil)
+        win.contentView = nil
+        if ocrPopup === win { ocrPopup = nil }
+        if ToolbarController.standalonePopup === win {
+            objc_setAssociatedObject(win, &ToolbarController.controllerOwnerKey,
+                                      nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            ToolbarController.standalonePopup = nil
         }
     }
 
@@ -414,13 +518,7 @@ extension ToolbarController {
             ClipboardService.copy(text: tv.string)
             flashHUD("Text copied")
         }
-        // Close the popup after copying (per request: don't leave a window hanging
-        // around once the user's grabbed the text they wanted).
-        if let win = sender.window {
-            win.orderOut(nil)
-            win.contentView = nil
-            if ocrPopup === win { ocrPopup = nil }
-        }
+        if let win = sender.window { dismissPopupWindow(win) }
     }
 
     private func flashHUD(_ msg: String) {
