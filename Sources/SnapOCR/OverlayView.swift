@@ -32,6 +32,13 @@ final class OverlayView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var acceptsFirstResponder: Bool { true }
+
+    /// With multi-monitor setups only ONE overlay window is key at a time. Without
+    /// this override, the first click on a non-key overlay (the OTHER monitor) is
+    /// swallowed by AppKit as an activation click rather than passed to mouseDown,
+    /// so the user has to click twice to start a drag-select on the other screen.
+    /// Returning true tells AppKit the very first click is a real mouse event.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
 
     override func mouseDown(with event: NSEvent) {

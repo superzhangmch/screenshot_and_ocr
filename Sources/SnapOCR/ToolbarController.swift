@@ -157,15 +157,16 @@ final class ToolbarController: NSObject {
         var f = NSRect(x: selection.minX,
                        y: selection.minY - tbHeight - 6,
                        width: tbWidth, height: tbHeight)
-        // If that would clip the bottom of the screen, place it ABOVE the selection.
-        if f.minY < scr.minY + 4 {
-            f.origin.y = selection.maxY + 6
-        }
-        // If "above" would also clip the top (rare — near-fullheight selection),
-        // fall back to inside the selection at the bottom edge.
-        if f.maxY > scr.maxY - 4 {
-            f.origin.y = selection.minY + 6
-        }
+        // Vertical: if BELOW would clip the bottom of the screen, place ABOVE the
+        // selection. If "above" also clips the top, fall back to inside.
+        if f.minY < scr.minY + 4 { f.origin.y = selection.maxY + 6 }
+        if f.maxY > scr.maxY - 4 { f.origin.y = selection.minY + 6 }
+        // Horizontal: if the toolbar would extend past the right edge of the screen
+        // (selection is near the right side and toolbar is wider than the remaining
+        // space), shift it leftward so all buttons stay visible. Then clamp to the
+        // left edge for the extreme narrow-screen case.
+        if f.maxX > scr.maxX - 4 { f.origin.x = scr.maxX - 4 - tbWidth }
+        if f.origin.x < scr.minX + 4 { f.origin.x = scr.minX + 4 }
         return f
     }
 
@@ -212,17 +213,14 @@ extension ToolbarController: ToolbarViewDelegate {
         case .ocrLocal: runLocalOCR()
         case .ocrLLM:   runOCR()
         case .copy:     copyEditedImage()
-        case .save:     saveEditedImage()
         case .close:    dismiss()
         }
     }
 
     func toolbar(_ tb: ToolbarView, didPickColor color: NSColor) {
         editorView.strokeColor = color
-        // Recolor only applies to the selected annotation in select mode (per request).
-        // Active-text recolor was removed: while typing, color picks no longer change the
-        // input box. Commit, switch to select, click the annotation, then change color.
         editorView.applyColorToSelected(color)
+        editorView.applyColorToActiveText(color)
     }
 
     func toolbar(_ tb: ToolbarView, didPickWidth width: CGFloat) {
@@ -238,20 +236,6 @@ extension ToolbarController {
         // Per request: Copy → copy + immediately dismiss everything (editor, toolbar, frozen overlay).
         // No HUD needed; the disappearance itself signals success.
         dismiss()
-    }
-
-    private func saveEditedImage() {
-        guard let img = editorView.flattenedCGImage() else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        panel.nameFieldStringValue = "snapocr-\(stamp).png"
-        if panel.runModal() == .OK, let url = panel.url {
-            let rep = NSBitmapImageRep(cgImage: img)
-            if let data = rep.representation(using: .png, properties: [:]) {
-                try? data.write(to: url)
-            }
-        }
     }
 
     /// On-device OCR via Apple Vision. Synchronous-ish (runs on a background queue,
@@ -344,11 +328,23 @@ extension ToolbarController {
         let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyOCRText(_:)))
         copyBtn.frame = NSRect(x: 260, y: 8, width: 90, height: 28)
         copyBtn.bezelStyle = .rounded
+        // Default button: macOS paints it in the accent color and Return triggers it.
+        copyBtn.keyEquivalent = "\r"
+        // Make the label bolder so it visually pops vs Close.
+        copyBtn.attributedTitle = NSAttributedString(
+            string: "Copy",
+            attributes: [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.boldSystemFont(ofSize: 13)
+            ]
+        )
         objc_setAssociatedObject(copyBtn, &OCRPopupKey.tv, tv, .OBJC_ASSOCIATION_RETAIN)
 
         let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeOCRPopup(_:)))
         closeBtn.frame = NSRect(x: 360, y: 8, width: 90, height: 28)
         closeBtn.bezelStyle = .rounded
+        // Esc also closes the popup.
+        closeBtn.keyEquivalent = "\u{1b}"
 
         let container = NSView(frame: win.contentView!.bounds)
         container.autoresizingMask = [.width, .height]

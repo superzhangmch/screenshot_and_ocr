@@ -39,6 +39,10 @@ final class EditorView: NSView {
 
     /// Active text view, if any. Auto-commits on next mouseDown / tool switch.
     private weak var activeTextView: LiveTextView?
+    /// Cursor-hint subview placed at the bottom-right corner of the active text input.
+    /// Owned by EditorView (unflipped) so its tracking-area coordinates can't be
+    /// mis-interpreted the way a child of the flipped NSTextView was.
+    private var inputHandleHint: HandleHintView?
 
     /// Active resize-handle drag (set on mouseDown over a handle, cleared on mouseUp).
     private var draggingHandle: ResizeHandle?
@@ -111,6 +115,20 @@ final class EditorView: NSView {
     var canUndo: Bool { !annotations.isEmpty || activeTextView != nil }
 
     var hasActiveTextField: Bool { activeTextView != nil }
+
+    /// While the user is typing in a live text input, repaint the existing characters
+    /// AND set typingAttributes so future characters use the new color too.
+    func applyColorToActiveText(_ color: NSColor) {
+        guard let tv = activeTextView else { return }
+        tv.textColor = color
+        if let storage = tv.textStorage {
+            storage.addAttribute(.foregroundColor, value: color,
+                                  range: NSRange(location: 0, length: storage.length))
+        }
+        var attrs = tv.typingAttributes
+        attrs[.foregroundColor] = color
+        tv.typingAttributes = attrs
+    }
 
     /// Apply a new color to the currently-selected annotation (works for line, stroke,
     /// and text). No-op if no selection.
@@ -321,7 +339,19 @@ final class EditorView: NSView {
         case .freehand:
             liveStrokePoints = [p]
         case .text:
-            dropTextField(at: p)
+            // Double-click on a committed text annotation → reopen it for editing.
+            // (Single click still drops a new input.)
+            if event.clickCount >= 2, let idx = hitTestTextAnnotation(at: p),
+               case .text(let str, let frame, let color, let font) = annotations[idx] {
+                annotations.remove(at: idx)
+                selectedAnnotationIndex = nil
+                redoStack.removeAll()
+                reEditTextField(at: frame.insetBy(dx: -4, dy: -4),
+                                prefill: str, color: color, font: font)
+                needsDisplay = true
+            } else {
+                dropTextField(at: p)
+            }
         case .mosaic:
             mosaicDragStart = p
             liveMosaicRect = NSRect(origin: p, size: .zero)
@@ -329,16 +359,16 @@ final class EditorView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        // Resize drag — highest priority.
+        // Resize drag — annotations stay at SCREEN positions while the box reshapes.
         if let handle = draggingHandle, let win = window {
             let mouseScreen = win.convertPoint(toScreen: event.locationInWindow)
             let dx = mouseScreen.x - anchorMouseScreen.x
             let dy = mouseScreen.y - anchorMouseScreen.y
             let newFrame = newFrameForResize(handle, dx: dx, dy: dy)
-            applyNewWindowFrame(newFrame)
+            applyNewWindowFrame(newFrame, keepAnnotationsAtScreenPositions: true)
             return
         }
-        // Select-mode empty-area drag → move the whole selection box (no resize).
+        // Whole-box move — annotations travel with the box (stay at LOCAL positions).
         if draggingSelection, let win = window {
             let mouseScreen = win.convertPoint(toScreen: event.locationInWindow)
             let dx = mouseScreen.x - anchorMouseScreen.x
@@ -346,7 +376,7 @@ final class EditorView: NSView {
             var f = anchorWindowFrame
             f.origin.x += dx
             f.origin.y += dy
-            applyNewWindowFrame(f)
+            applyNewWindowFrame(f, keepAnnotationsAtScreenPositions: false)
             return
         }
         let p = convert(event.locationInWindow, from: nil)
@@ -446,18 +476,26 @@ final class EditorView: NSView {
         ctx.restoreGState()
     }
 
-    /// Resize the editor window to `newFrame` (screen coords) and translate annotations
-    /// by the inverse origin delta so they stay glued to the same screen pixels.
-    private func applyNewWindowFrame(_ newFrame: NSRect) {
+    /// Resize/move the editor window to `newFrame` (screen coords).
+    ///
+    /// `keepAnnotationsAtScreenPositions`:
+    /// - **true** (resize handles): annotations stay glued to the same SCREEN pixels —
+    ///   their local coords shift by `-Δ` so a line you drew on a button stays on that
+    ///   button as the box grows/shrinks around it.
+    /// - **false** (whole-box move): annotations stay at the same LOCAL position inside
+    ///   the box — they travel with the box. A circle drawn in the middle stays in the
+    ///   middle of the moved box.
+    private func applyNewWindowFrame(_ newFrame: NSRect,
+                                     keepAnnotationsAtScreenPositions: Bool) {
         guard let win = window else { return }
         let oldFrame = win.frame
         let dx = newFrame.minX - oldFrame.minX
         let dy = newFrame.minY - oldFrame.minY
 
         win.setFrame(newFrame, display: true)
-        // -dx, -dy because: editor moved by (dx, dy) in screen, so to keep annotations
-        // at the same screen position their local coords must shift by (-dx, -dy).
-        translateAllAnnotations(dx: -dx, dy: -dy)
+        if keepAnnotationsAtScreenPositions {
+            translateAllAnnotations(dx: -dx, dy: -dy)
+        }
 
         // The window is halo-padded, but downstream (toolbar position, overlay re-freeze,
         // re-crop) wants the VISIBLE selection rect. Strip the halo before forwarding.
@@ -514,12 +552,46 @@ final class EditorView: NSView {
         tv.delegate = self
         addSubview(tv)
         activeTextView = tv
+        installHandleHint(for: tv)
         DispatchQueue.main.async { [weak self, weak tv] in
             guard let self = self, let tv = tv else { return }
             self.window?.makeFirstResponder(tv)
             tv.setSelectedRange(NSRange(location: tv.string.count, length: 0))
         }
         tv.autoResize()
+    }
+
+    private func installHandleHint(for tv: LiveTextView) {
+        let hint = HandleHintView(cursor: LiveTextView.cornerResizeCursor)
+        addSubview(hint, positioned: .above, relativeTo: tv)
+        inputHandleHint = hint
+        repositionInputHandleHint()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(textViewFrameDidChange(_:)),
+            name: NSView.frameDidChangeNotification, object: tv
+        )
+    }
+
+    @objc private func textViewFrameDidChange(_ note: Notification) {
+        repositionInputHandleHint()
+    }
+
+    private func repositionInputHandleHint() {
+        guard let hint = inputHandleHint, let tv = activeTextView else { return }
+        let pt: CGFloat = 18
+        hint.frame = NSRect(x: tv.frame.maxX - pt,
+                            y: tv.frame.minY,
+                            width: pt, height: pt)
+    }
+
+    private func removeHandleHint(for tv: LiveTextView?) {
+        if let tv = tv {
+            NotificationCenter.default.removeObserver(
+                self, name: NSView.frameDidChangeNotification, object: tv
+            )
+        }
+        inputHandleHint?.removeFromSuperview()
+        inputHandleHint = nil
     }
 
     /// Restore a text input field at a specific frame (used for double-click re-edit so
@@ -534,6 +606,7 @@ final class EditorView: NSView {
         tv.delegate = self
         addSubview(tv)
         activeTextView = tv
+        installHandleHint(for: tv)
         DispatchQueue.main.async { [weak self, weak tv] in
             guard let self = self, let tv = tv else { return }
             self.window?.makeFirstResponder(tv)
@@ -544,9 +617,6 @@ final class EditorView: NSView {
 
     private func commitActiveTextField() {
         guard let tv = activeTextView else { return }
-        // Force a synchronous final resize so the stored frame matches what the user
-        // actually saw (textDidChange's autoResize is deferred via DispatchQueue.async
-        // to avoid a TextKit re-entrancy crash; on commit we want the latest layout).
         tv.autoResize()
         if !tv.string.isEmpty {
             let inset: CGFloat = 4
@@ -556,6 +626,7 @@ final class EditorView: NSView {
                                   color: tv.textColor ?? strokeColor,
                                   font: tv.font ?? .systemFont(ofSize: 18, weight: .medium)))
         }
+        removeHandleHint(for: tv)
         tv.removeFromSuperview()
         activeTextView = nil
         needsDisplay = true
@@ -669,8 +740,11 @@ final class LiveTextView: NSTextView {
     private func commonInit() {
         wantsLayer = true
         layer?.cornerRadius = 4
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.6).cgColor
+        // Make the border obviously colored so the input area is easy to spot against
+        // the screenshot underneath.
+        layer?.borderWidth = 2
+        layer?.borderColor = NSColor.systemBlue.cgColor
+        layer?.cornerRadius = 4
         backgroundColor = NSColor.white.withAlphaComponent(0.85)
         drawsBackground = true
         isRichText = false
@@ -679,28 +753,153 @@ final class LiveTextView: NSTextView {
         isSelectable = true
         allowsUndo = true
         isHorizontallyResizable = false
-        isVerticallyResizable = true
+        // We manage frame manually (autoResize for content-fit, user-drag for explicit
+        // resize). With this true, NSTextView fights us by snapping the frame back to
+        // hugging the current text — which is why drag-DOWN reverted instantly.
+        isVerticallyResizable = false
         insertionPointColor = .systemBlue
         textContainerInset = NSSize(width: 4, height: 4)
         autoresizingMask = []
         textContainer?.widthTracksTextView = false
         textContainer?.heightTracksTextView = false
+        postsFrameChangedNotifications = true
     }
 
     override var acceptsFirstResponder: Bool { true }
 
+    // MARK: - user-resize by dragging the bottom-right corner
+
+    /// Set to true once the user explicitly drags to resize. Subsequent autoResize calls
+    /// only GROW the box (never shrink, never change width) so the user's preferred size
+    /// is preserved while they keep typing.
+    private(set) var userResized: Bool = false
+    private var resizing: Bool = false
+    private var resizeAnchorFrame: NSRect = .zero
+    private var resizeAnchorMouseScreen: NSPoint = .zero
+    private let resizeHandlePt: CGFloat = 18
+
+    /// Bottom-right corner area where mousedown starts a resize drag.
+    /// NSTextView is **flipped** (y=0 is the top) so the bottom-right corner is at
+    /// `(bounds.maxX, bounds.maxY)`, not `(bounds.maxX, bounds.minY)`.
+    private var resizeHandleRect: NSRect {
+        NSRect(x: bounds.maxX - resizeHandlePt,
+               y: bounds.maxY - resizeHandlePt,
+               width: resizeHandlePt, height: resizeHandlePt)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if resizeHandleRect.contains(p) {
+            resizing = true
+            resizeAnchorFrame = frame
+            resizeAnchorMouseScreen = window?.convertPoint(toScreen: event.locationInWindow) ?? .zero
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if resizing, let win = window {
+            let mouse = win.convertPoint(toScreen: event.locationInWindow)
+            let dx = mouse.x - resizeAnchorMouseScreen.x
+            let dy = mouse.y - resizeAnchorMouseScreen.y
+            // Y-up: dragging mouse DOWN means screen y decreases (dy negative). The handle
+            // is at the BOTTOM-right; dragging down should grow the box downward = origin.y
+            // moves down (decreases) and height grows (-dy).
+            var f = resizeAnchorFrame
+            f.size.width  = max(80, resizeAnchorFrame.size.width + dx)
+            let newH      = max(28, resizeAnchorFrame.size.height - dy)
+            f.origin.y    = resizeAnchorFrame.origin.y + (resizeAnchorFrame.size.height - newH)
+            f.size.height = newH
+            self.frame = f
+            textContainer?.size = NSSize(
+                width: max(20, f.size.width - textContainerInset.width * 2),
+                height: .greatestFiniteMagnitude
+            )
+            userResized = true
+            needsDisplay = true
+            return
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if resizing { resizing = false; return }
+        super.mouseUp(with: event)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()                  // iBeam over text area
+        addCursorRect(resizeHandleRect, cursor: Self.cornerResizeCursor)
+    }
+
+    /// NSTextView routes cursor changes through `cursorUpdate(with:)` (driven by its
+    /// tracking areas) rather than honoring our small cursor-rect — so we have to
+    /// intercept here too, otherwise the I-beam wins everywhere even over our handle.
+    override func cursorUpdate(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if resizeHandleRect.contains(p) {
+            Self.cornerResizeCursor.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    // The cursor-change hint subview is owned by EditorView (the textview's superview),
+    // not by us. NSTextView mishandles non-text subviews (treats them like inline
+    // attachments and lays them in weird places), so placing the hint as a sibling in
+    // the unflipped EditorView is the only reliable path.
+
+    /// macOS 15 added a proper diagonal frame-resize cursor; on older macOS we fall
+    /// back to resizeUpDown (the closest built-in).
+    static let cornerResizeCursor: NSCursor = {
+        if #available(macOS 15.0, *) {
+            return NSCursor.frameResize(position: .bottomRight, directions: .all)
+        } else {
+            return .resizeUpDown
+        }
+    }()
+
+    /// Draw a small diagonal-stripes glyph in the bottom-right corner so the user sees
+    /// the resize affordance.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let r = resizeHandleRect
+        ctx.saveGState()
+        // Filled triangle in the bottom-right corner (flipped coords: maxY is the bottom).
+        ctx.setFillColor(NSColor.systemBlue.cgColor)
+        ctx.move(to:    NSPoint(x: r.maxX, y: r.maxY))    // bottom-right corner of view
+        ctx.addLine(to: NSPoint(x: r.maxX, y: r.minY))    // up along right edge
+        ctx.addLine(to: NSPoint(x: r.minX, y: r.maxY))    // diagonal back to bottom-left of handle
+        ctx.closePath()
+        ctx.fillPath()
+        // White diagonal stripes in the corner (matches macOS resize affordance).
+        ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.9).cgColor)
+        ctx.setLineWidth(1.2)
+        ctx.setLineCap(.round)
+        for i in 0..<3 {
+            let off = CGFloat(i) * 4 + 4
+            ctx.move(to:    NSPoint(x: r.maxX - 2,   y: r.maxY - off))
+            ctx.addLine(to: NSPoint(x: r.maxX - off, y: r.maxY - 2))
+        }
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+
     override func keyDown(with event: NSEvent) {
         // keyCode 36 = Return, 53 = Escape
         if event.keyCode == 36 {
-            if event.modifierFlags.contains(.shift) {
-                // Shift+Return → newline
-                self.insertText("\n", replacementRange: self.selectedRange())
-            } else {
+            // ⌘Return commits (explicit "I'm done"); plain Return / Shift+Return both
+            // insert a newline so typing multi-line text feels normal.
+            if event.modifierFlags.contains(.command) {
                 commitCallback?()
+                return
             }
-            return
+            // Fall through to NSTextView's default, which inserts \n via insertNewline:.
         }
         if event.keyCode == 53 {
+            // Esc commits.
             commitCallback?()
             return
         }
@@ -712,16 +911,25 @@ final class LiveTextView: NSTextView {
         lm.ensureLayout(for: tc)
         let used = lm.usedRect(for: tc)
         let inset = textContainerInset
-        let newH = max(28, ceil(used.height) + inset.height*2 + 4)
-        let newW = max(120, ceil(used.width)  + inset.width*2  + 8)
-        if abs(frame.size.height - newH) > 0.5 || abs(frame.size.width - newW) > 0.5 {
-            var f = frame
-            // Keep top-left fixed: when growing taller, drop bottom; when growing wider, extend right.
-            f.origin.y -= (newH - f.size.height)
-            f.size.height = newH
-            f.size.width = newW
-            // Update text container width to match new view width so wrapping uses the new width.
-            tc.size = NSSize(width: newW - inset.width*2, height: .greatestFiniteMagnitude)
+        let neededH = max(28, ceil(used.height) + inset.height*2 + 4)
+        let neededW = max(120, ceil(used.width)  + inset.width*2  + 8)
+
+        var f = frame
+        if userResized {
+            // Honor the user-chosen size — only grow vertically if content overflows,
+            // never shrink, never touch width.
+            if neededH > f.size.height + 0.5 {
+                f.origin.y -= (neededH - f.size.height)
+                f.size.height = neededH
+                self.frame = f
+            }
+            return
+        }
+        if abs(f.size.height - neededH) > 0.5 || abs(f.size.width - neededW) > 0.5 {
+            f.origin.y -= (neededH - f.size.height)
+            f.size.height = neededH
+            f.size.width  = neededW
+            tc.size = NSSize(width: neededW - inset.width*2, height: .greatestFiniteMagnitude)
             self.frame = f
         }
     }
@@ -865,24 +1073,27 @@ enum Annotation {
             ctx.strokePath()
             ctx.restoreGState()
         case .text(let str, let frame, let color, let font):
-            // Draw line-by-line into the unflipped (Y-up) context. NSAttributedString.draw(at:)
-            // places the BASELINE at the given y. Line layout matches NSTextView with the
-            // default text container inset (4pt top): first baseline = frame.maxY - ascender,
-            // subsequent baselines step down by font.lineHeight.
+            // Draw with word wrapping so the rendered annotation has the SAME number of
+            // visual lines as the input box did. NSStringDrawing's .usesLineFragmentOrigin
+            // does proper wrapping at `frame.width`, but it needs a flipped (top-down)
+            // graphics context — so we momentarily flip CG around the rect's vertical
+            // midpoint, then restore.
+            let para = NSMutableParagraphStyle()
+            para.lineBreakMode = .byWordWrapping
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: color
+                .foregroundColor: color,
+                .paragraphStyle: para
             ]
+            let ns = NSAttributedString(string: str, attributes: attrs)
+            ctx.saveGState()
             NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-            let lines = str.components(separatedBy: "\n")
-            let lineH = font.ascender - font.descender + font.leading
-            for (i, line) in lines.enumerated() {
-                let lineStr = NSAttributedString(string: line, attributes: attrs)
-                let baseline = frame.maxY - font.ascender - CGFloat(i) * lineH
-                lineStr.draw(at: NSPoint(x: frame.minX, y: baseline))
-            }
+            ctx.translateBy(x: 0, y: frame.maxY + frame.minY)
+            ctx.scaleBy(x: 1, y: -1)
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+            ns.draw(with: frame, options: [.usesLineFragmentOrigin])
             NSGraphicsContext.restoreGraphicsState()
+            ctx.restoreGState()
         case .mosaic(let rect):
             Annotation.renderMosaic(rect: rect, in: ctx,
                                      baseImage: baseImage, selRect: selRect)
@@ -931,4 +1142,52 @@ enum Annotation {
         ctx.draw(smallImg, in: rect)
         ctx.restoreGState()
     }
+}
+
+/// A tiny standalone NSView used as a corner cursor-hint. Its own bounds are unflipped
+/// 18×18, so its tracking area / cursor rects use plain XY — no flipped-coordinate
+/// surprises. Click pass-through (hitTest = nil) lets the parent LiveTextView keep
+/// handling the actual resize-drag via its own mouseDown.
+final class HandleHintView: NSView {
+    private let cursor: NSCursor
+    private var trackArea: NSTrackingArea?
+
+    init(cursor: NSCursor) {
+        self.cursor = cursor
+        super.init(frame: .zero)
+        wantsLayer = true
+        // TEMP: tint the hint translucent so we can visually confirm where it lands.
+        // Once cursor + drag are verified working, remove this fill.
+        layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.25).cgColor
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackArea { removeTrackingArea(ta) }
+        let ta = NSTrackingArea(
+            rect: bounds,
+            options: [.cursorUpdate, .mouseEnteredAndExited, .mouseMoved,
+                      .activeInKeyWindow],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(ta)
+        trackArea = ta
+        // The mouseMoved option is only meaningful if the window accepts mouse-moved
+        // events; opt in lazily here so callers don't have to remember.
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override func mouseEntered(with event: NSEvent) { cursor.set() }
+    override func mouseExited(with event: NSEvent)  { NSCursor.iBeam.set() }
+    override func cursorUpdate(with event: NSEvent) { cursor.set() }
+    // Force-reassert on every mouseMoved so NSTextView's I-beam can't win the race.
+    override func mouseMoved(with event: NSEvent)   { cursor.set() }
+
+    /// Click pass-through to the LiveTextView underneath (which owns the resize-drag).
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
