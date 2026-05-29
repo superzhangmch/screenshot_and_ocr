@@ -3,6 +3,8 @@
 A tiny native macOS screenshot + annotate + LLM-OCR tool. Runs in the background,
 triggered by ⌘⇧A.
 
+(By AI, 个人自娱自乐使用的)
+
 ## What it does
 
 1. **⌘⇧A** — screen freezes with a dim overlay
