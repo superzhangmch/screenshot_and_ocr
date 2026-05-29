@@ -45,9 +45,15 @@ final class ToolbarView: NSView {
     private let pad: CGFloat = 8
     private let sepW: CGFloat = 10
 
+    /// Copy is the primary "I'm done — take the image" action, so it gets a wider,
+    /// labelled pill instead of a bare 36pt icon lane.
+    private func buttonWidth(for tool: ToolbarTool) -> CGFloat {
+        tool == .copy ? 66 : buttonW
+    }
+
     override var intrinsicContentSize: NSSize {
-        // 2 swatches + separator + N tool buttons
-        let toolsW = CGFloat(items.count) * buttonW
+        // 2 swatches + separator + N tool buttons (copy is wider)
+        let toolsW = items.reduce(CGFloat(0)) { $0 + buttonWidth(for: $1.tool) }
         return NSSize(width: pad*2 + swatchW*2 + sepW + toolsW, height: 36)
     }
 
@@ -79,8 +85,10 @@ final class ToolbarView: NSView {
         addSubview(sep)
 
         let toolsStartX = pad + swatchW*2 + sepW
+        var x = toolsStartX
         for (i, item) in items.enumerated() {
-            let b = NSButton(frame: NSRect(x: toolsStartX + CGFloat(i)*buttonW, y: 4, width: buttonW, height: 28))
+            let w = buttonWidth(for: item.tool)
+            let b = NSButton(frame: NSRect(x: x, y: 4, width: w, height: 28))
             b.bezelStyle = .regularSquare
             b.isBordered = false
             b.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: item.label)
@@ -89,8 +97,22 @@ final class ToolbarView: NSView {
             b.tag = i
             b.target = self
             b.action = #selector(tap(_:))
+            if item.tool == .copy {
+                // Accent pill: green background + icon-leading "Copy" label so the
+                // primary capture action reads clearly against the icon row.
+                b.wantsLayer = true
+                b.layer?.cornerRadius = 6
+                b.layer?.backgroundColor = NSColor.systemGreen.cgColor
+                b.imagePosition = .imageLeading
+                b.imageHugsTitle = true
+                b.attributedTitle = NSAttributedString(
+                    string: " Copy",
+                    attributes: [.foregroundColor: NSColor.white,
+                                 .font: NSFont.boldSystemFont(ofSize: 12)])
+            }
             addSubview(b)
             toolButtons.append(b)
+            x += w
         }
         // Visually mark "freehand" (pencil) as the default active tool.
         highlight(tool: .freehand)
