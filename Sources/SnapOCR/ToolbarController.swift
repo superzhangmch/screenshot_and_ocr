@@ -232,6 +232,12 @@ extension ToolbarController: ToolbarViewDelegate {
         case .rectangle: editorView.tool = .rectangle
         case .text:     editorView.tool = .text
         case .mosaic:   editorView.tool = .mosaic
+        case .whiteboard:
+            // Mosaic is meaningless on a blank canvas — enabling whiteboard drops the
+            // editor from mosaic back to freehand; re-sync the toolbar highlight to match.
+            let wasMosaic = editorView.tool == .mosaic
+            editorView.whiteboard = tb.whiteboardOn
+            if tb.whiteboardOn && wasMosaic { tb.highlight(tool: .freehand) }
         case .undo:     editorView.undo()
         case .redo:     editorView.redo()
         case .ocrLocal: runLocalOCR()

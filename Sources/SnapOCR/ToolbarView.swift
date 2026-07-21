@@ -1,6 +1,6 @@
 import AppKit
 
-enum ToolbarTool { case select, line, freehand, rectangle, text, mosaic, ocrLocal, ocrLLM, englishExplain, undo, redo, copy, close }
+enum ToolbarTool { case select, line, freehand, rectangle, text, mosaic, whiteboard, ocrLocal, ocrLLM, englishExplain, undo, redo, copy, close }
 
 protocol ToolbarViewDelegate: AnyObject {
     func toolbar(_ tb: ToolbarView, didSelect tool: ToolbarTool)
@@ -18,23 +18,41 @@ final class ToolbarView: NSView {
     static let widthPresets: [CGFloat] = [1, 2, 3, 5, 8]
     private(set) var currentColor: NSColor = .systemRed
     private(set) var currentWidth: CGFloat = 2
+    /// Whiteboard is a MODE toggle, not a drawing tool — it stays lit independently of
+    /// which drawing tool is active.
+    private(set) var whiteboardOn: Bool = false
 
-    private struct Item { let symbol: String; let label: String; let tool: ToolbarTool }
+    // `group` clusters related buttons; a thin vertical separator is drawn wherever the
+    // group changes between two adjacent buttons.
+    private struct Item { let symbol: String; let label: String; let tool: ToolbarTool; let group: Int }
     private let items: [Item] = [
-        Item(symbol: "cursorarrow",           label: "Select / Move (Del to remove)", tool: .select),
-        Item(symbol: "line.diagonal",         label: "Line",     tool: .line),
-        Item(symbol: "scribble.variable",     label: "Pencil",   tool: .freehand),
-        Item(symbol: "rectangle",             label: "Rounded rectangle", tool: .rectangle),
-        Item(symbol: "textformat",            label: "Text",     tool: .text),
-        Item(symbol: "square.grid.3x3.fill",  label: "Mosaic (redact)", tool: .mosaic),
-        Item(symbol: "text.viewfinder",       label: "OCR (Local · Apple Vision · fast)", tool: .ocrLocal),
-        Item(symbol: "sparkles",              label: "OCR (LLM · slower, better on hard cases)", tool: .ocrLLM),
-        Item(symbol: "character.book.closed", label: "Explain English (LLM)", tool: .englishExplain),
-        Item(symbol: "arrow.uturn.backward",  label: "Undo (⌘Z)",tool: .undo),
-        Item(symbol: "arrow.uturn.forward",   label: "Redo (⌘⇧Z)",tool: .redo),
-        Item(symbol: "doc.on.clipboard",      label: "Copy",     tool: .copy),
-        Item(symbol: "xmark.circle",          label: "Close",    tool: .close),
+        // Group 0 — select / move + canvas mode (not drawing tools)
+        Item(symbol: "cursorarrow",           label: "Select / Move (Del to remove)", tool: .select, group: 0),
+        Item(symbol: "rectangle.dashed",      label: "Whiteboard (blank canvas — draw on white instead of the screenshot)", tool: .whiteboard, group: 0),
+        // Group 1 — draw / annotate
+        Item(symbol: "line.diagonal",         label: "Line",     tool: .line, group: 1),
+        Item(symbol: "scribble.variable",     label: "Pencil",   tool: .freehand, group: 1),
+        Item(symbol: "rectangle",             label: "Rounded rectangle", tool: .rectangle, group: 1),
+        Item(symbol: "textformat",            label: "Text",     tool: .text, group: 1),
+        Item(symbol: "square.grid.3x3.fill",  label: "Mosaic (redact)", tool: .mosaic, group: 1),
+        // Group 3 — extract text / AI
+        Item(symbol: "text.viewfinder",       label: "OCR (Local · Apple Vision · fast)", tool: .ocrLocal, group: 3),
+        Item(symbol: "sparkles",              label: "OCR (LLM · slower, better on hard cases)", tool: .ocrLLM, group: 3),
+        Item(symbol: "character.book.closed", label: "Explain English (LLM)", tool: .englishExplain, group: 3),
+        // Group 4 — history
+        Item(symbol: "arrow.uturn.backward",  label: "Undo (⌘Z)",tool: .undo, group: 4),
+        Item(symbol: "arrow.uturn.forward",   label: "Redo (⌘⇧Z)",tool: .redo, group: 4),
+        // Group 5 — finish
+        Item(symbol: "doc.on.clipboard",      label: "Copy",     tool: .copy, group: 5),
+        Item(symbol: "xmark.circle",          label: "Close",    tool: .close, group: 5),
     ]
+
+    /// Indices `i` (≥1) where `items[i]` starts a new group — a separator is drawn before it.
+    private var groupBreaks: [Int] {
+        (1..<items.count).filter { items[$0].group != items[$0 - 1].group }
+    }
+    /// Horizontal space each inter-group separator occupies (line centered within it).
+    private let groupSepW: CGFloat = 11
 
     private var colorWell: ColorSwatchButton!
     private var widthWell: WidthSwatchButton!
@@ -52,9 +70,10 @@ final class ToolbarView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        // 2 swatches + separator + N tool buttons (copy is wider)
+        // 2 swatches + separator + N tool buttons (copy is wider) + inter-group separators
         let toolsW = items.reduce(CGFloat(0)) { $0 + buttonWidth(for: $1.tool) }
-        return NSSize(width: pad*2 + swatchW*2 + sepW + toolsW, height: 36)
+        let groupSepsW = CGFloat(groupBreaks.count) * groupSepW
+        return NSSize(width: pad*2 + swatchW*2 + sepW + toolsW + groupSepsW, height: 36)
     }
 
     init() {
@@ -85,8 +104,13 @@ final class ToolbarView: NSView {
         addSubview(sep)
 
         let toolsStartX = pad + swatchW*2 + sepW
+        let breaks = Set(groupBreaks)
         var x = toolsStartX
         for (i, item) in items.enumerated() {
+            if breaks.contains(i) {
+                addGroupSeparator(atX: x + groupSepW/2)
+                x += groupSepW
+            }
             let w = buttonWidth(for: item.tool)
             let b = NSButton(frame: NSRect(x: x, y: 4, width: w, height: 28))
             b.bezelStyle = .regularSquare
@@ -119,8 +143,21 @@ final class ToolbarView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Thin vertical divider between button groups, matching the swatch/tools separator.
+    private func addGroupSeparator(atX cx: CGFloat) {
+        let sep = NSView(frame: NSRect(x: cx, y: 8, width: 1, height: 20))
+        sep.wantsLayer = true
+        sep.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        addSubview(sep)
+    }
+
     func highlight(tool: ToolbarTool) {
         for (i, item) in items.enumerated() {
+            // The whiteboard button reflects its own toggle state, not the active tool.
+            if item.tool == .whiteboard {
+                toolButtons[i].contentTintColor = whiteboardOn ? NSColor.systemYellow : .white
+                continue
+            }
             let active = (item.tool == tool)
             toolButtons[i].contentTintColor = active ? NSColor.systemBlue : .white
         }
@@ -128,6 +165,13 @@ final class ToolbarView: NSView {
 
     @objc private func tap(_ sender: NSButton) {
         let tool = items[sender.tag].tool
+        if tool == .whiteboard {
+            // Toggle the mode; keep the current drawing tool's highlight intact.
+            whiteboardOn.toggle()
+            sender.contentTintColor = whiteboardOn ? NSColor.systemYellow : .white
+            delegate?.toolbar(self, didSelect: tool)
+            return
+        }
         if tool == .select || tool == .line || tool == .freehand
             || tool == .rectangle || tool == .text || tool == .mosaic {
             highlight(tool: tool)

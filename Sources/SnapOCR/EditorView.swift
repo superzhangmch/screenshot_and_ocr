@@ -74,6 +74,18 @@ final class EditorView: NSView {
     var strokeColor: NSColor = .systemRed
     var strokeWidth: CGFloat = 2
 
+    /// Whiteboard mode: instead of showing the captured screenshot, the selection is
+    /// painted opaque white so the user draws on a blank canvas. The screenshot pixels
+    /// (still shown by the frozen overlay window underneath) are simply covered here, and
+    /// the export fills white instead of the base image. Mosaic sampling is suppressed so
+    /// it can't reveal the hidden screenshot.
+    var whiteboard: Bool = false {
+        didSet {
+            if whiteboard && tool == .mosaic { tool = .freehand }
+            needsDisplay = true
+        }
+    }
+
     init(image: CGImage, frame: NSRect) {
         self.baseImage = image
         super.init(frame: frame)
@@ -657,12 +669,21 @@ final class EditorView: NSView {
         ctx.setFillColor(NSColor(white: 0, alpha: 0.005).cgColor)
         ctx.fill(bounds)
 
+        // 1b) Whiteboard mode: paint the selection opaque white, covering the screenshot
+        //     shown by the frozen overlay underneath. Annotations draw on top.
+        if whiteboard {
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fill(selectionInsetRect)
+        }
+        // Suppress mosaic's screenshot sampling in whiteboard mode.
+        let mosaicBase = whiteboard ? nil : baseImage
+
         // 2) Annotations + live previews — clipped to the visible selection so they
         //    can never bleed into the invisible halo padding.
         ctx.saveGState()
         ctx.clip(to: selectionInsetRect)
         for a in annotations {
-            a.draw(in: ctx, baseImage: baseImage, selRect: selectionInsetRect)
+            a.draw(in: ctx, baseImage: mosaicBase, selRect: selectionInsetRect)
         }
         if let s = lineDragStart, let e = liveLineEnd {
             Annotation.line(from: s, to: e, color: strokeColor, width: strokeWidth).draw(in: ctx)
@@ -671,7 +692,7 @@ final class EditorView: NSView {
             Annotation.stroke(points: liveStrokePoints, color: strokeColor, width: strokeWidth).draw(in: ctx)
         }
         if let r = liveMosaicRect, r.width > 0, r.height > 0 {
-            Annotation.mosaic(rect: r).draw(in: ctx, baseImage: baseImage, selRect: selectionInsetRect)
+            Annotation.mosaic(rect: r).draw(in: ctx, baseImage: mosaicBase, selRect: selectionInsetRect)
         }
         if let r = liveRect, r.width > 0, r.height > 0 {
             Annotation.rectangle(rect: r, color: strokeColor, width: strokeWidth,
@@ -712,9 +733,16 @@ final class EditorView: NSView {
         ctx.scaleBy(x: scale, y: scale)
         // Shift so the selection's origin maps to (0,0) in the output bitmap.
         ctx.translateBy(x: -sel.minX, y: -sel.minY)
-        // baseImage's natural size matches the selection rect, so draw it there.
-        ctx.draw(baseImage, in: sel)
-        for a in annotations { a.draw(in: ctx, baseImage: baseImage, selRect: sel) }
+        if whiteboard {
+            // Blank canvas: fill white instead of the screenshot.
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fill(sel)
+        } else {
+            // baseImage's natural size matches the selection rect, so draw it there.
+            ctx.draw(baseImage, in: sel)
+        }
+        let mosaicBase = whiteboard ? nil : baseImage
+        for a in annotations { a.draw(in: ctx, baseImage: mosaicBase, selRect: sel) }
         return ctx.makeImage()
     }
 }
